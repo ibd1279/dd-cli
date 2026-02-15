@@ -57,11 +57,9 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+
     // Get yazap dependency
-    const yazap = b.dependency("yazap", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    const yazap = b.dependency("yazap", .{});
 
     const exe = b.addExecutable(.{
         .name = "dd_cli",

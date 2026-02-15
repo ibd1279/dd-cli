@@ -21,19 +21,40 @@ pub fn main() !void {
     // Parse arguments
     const matches = try app.parseProcess();
 
-    // Get configuration
-    const dd_url = matches.getSingleValue("url") orelse "datadoghq.com";
+    // Get configuration - use --url flag if provided, otherwise DD_SITE env var, otherwise default
+    var dd_url_owned: ?[]const u8 = null;
+    defer if (dd_url_owned) |url| allocator.free(url);
+
+    const dd_url = blk: {
+        if (matches.getSingleValue("url")) |url| {
+            break :blk url;
+        }
+        if (std.process.getEnvVarOwned(allocator, "DD_SITE")) |site| {
+            dd_url_owned = site;
+            break :blk site;
+        } else |_| {
+            break :blk "datadoghq.com";
+        }
+    };
     const api_path = matches.getSingleValue("path") orelse {
         std.debug.print("Error: --path (-p) is required\n", .{});
         return error.MissingPath;
     };
 
-    // Get API key from environment
-    const api_key = std.process.getEnvVarOwned(allocator, "DD_APP_API_KEY") catch |err| {
-        std.debug.print("Error: DD_APP_API_KEY environment variable not set\n", .{});
+    // Get API keys from environment (both required for read operations)
+    const api_key = std.process.getEnvVarOwned(allocator, "DD_API_KEY") catch |err| {
+        std.debug.print("Error: DD_API_KEY environment variable not set\n", .{});
+        std.debug.print("Required for API authentication\n", .{});
         return err;
     };
     defer allocator.free(api_key);
+
+    const app_key = std.process.getEnvVarOwned(allocator, "DD_APP_API_KEY") catch |err| {
+        std.debug.print("Error: DD_APP_API_KEY environment variable not set\n", .{});
+        std.debug.print("Required for API read operations\n", .{});
+        return err;
+    };
+    defer allocator.free(app_key);
 
     // Validate Datadog domain
     if (!isValidDatadogDomain(dd_url)) {
@@ -42,12 +63,18 @@ pub fn main() !void {
         return error.InvalidDomain;
     }
 
-    // Build full URL
-    const full_url = try std.fmt.allocPrint(allocator, "https://{s}{s}", .{ dd_url, api_path });
+    // Build full URL - prepend "api." if not already present
+    const api_domain = if (std.mem.startsWith(u8, dd_url, "api."))
+        dd_url
+    else
+        try std.fmt.allocPrint(allocator, "api.{s}", .{dd_url});
+    defer if (!std.mem.startsWith(u8, dd_url, "api.")) allocator.free(api_domain);
+
+    const full_url = try std.fmt.allocPrint(allocator, "https://{s}{s}", .{ api_domain, api_path });
     defer allocator.free(full_url);
 
     // Query Datadog API
-    const response_body = try queryDatadog(allocator, full_url, api_key);
+    const response_body = try queryDatadog(allocator, full_url, api_key, app_key);
     defer allocator.free(response_body);
 
     // Output JSON to stdout
@@ -79,7 +106,8 @@ fn isValidDatadogDomain(domain: []const u8) bool {
     return false;
 }
 
-fn queryDatadog(allocator: std.mem.Allocator, url: []const u8, api_key: []const u8) ![]const u8 {
+fn queryDatadog(allocator: std.mem.Allocator, url: []const u8, api_key: []const u8, app_key: []const u8) ![]const u8 {
+
     // Initialize HTTP client
     var client: std.http.Client = .{
         .allocator = allocator,
@@ -90,10 +118,11 @@ fn queryDatadog(allocator: std.mem.Allocator, url: []const u8, api_key: []const 
     var body_writer = std.Io.Writer.Allocating.init(allocator);
     defer body_writer.deinit();
 
-    // Build headers
-    var header_buf: [2]std.http.Header = undefined;
+    // Build headers - need both API key and Application key
+    var header_buf: [3]std.http.Header = undefined;
     header_buf[0] = .{ .name = "DD-API-KEY", .value = api_key };
-    header_buf[1] = .{ .name = "Accept", .value = "application/json" };
+    header_buf[1] = .{ .name = "DD-APPLICATION-KEY", .value = app_key };
+    header_buf[2] = .{ .name = "Accept", .value = "application/json" };
 
     // Perform request
     const result = try client.fetch(.{
@@ -106,6 +135,11 @@ fn queryDatadog(allocator: std.mem.Allocator, url: []const u8, api_key: []const 
     // Check response status
     if (result.status != .ok) {
         std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
+        const body = body_writer.written();
+        // Only show response body if it looks like JSON (starts with { or [)
+        if (body.len > 0 and (body[0] == '{' or body[0] == '[')) {
+            std.debug.print("Response: {s}\n", .{body});
+        }
         return error.RequestFailed;
     }
 

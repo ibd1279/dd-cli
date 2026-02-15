@@ -299,3 +299,7 @@ For detailed Datadog API documentation, see:
 - [Datadog API Documentation](https://docs.datadoghq.com/api/)
 - [Hosts API](https://docs.datadoghq.com/api/latest/hosts/)
 - [Validate API Key](https://docs.datadoghq.com/api/latest/authentication/#validate-api-key)
+
+## License
+
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.

@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     const yazap = b.dependency("yazap", .{});
 
     const exe = b.addExecutable(.{
-        .name = "dd_cli",
+        .name = "dd-cli",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of

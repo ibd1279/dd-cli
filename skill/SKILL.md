@@ -1,460 +1,299 @@
 ---
 name: datadog
-description: Query Datadog metrics and logs using the Datadog API. Use this skill when users want to check infrastructure metrics, query application logs, view error logs, list active hosts, search for available metrics, or monitor Kubernetes/Docker resources. Also use when users want to validate Datadog API credentials or check infrastructure health via Datadog.
+description: Query Datadog logs, metrics, and hosts using dd-cli. ONLY trigger when user mentions "Datadog" or "dd-cli" AND an observability signal (logs, metrics, hosts, errors, monitoring). Do NOT trigger on generic observability requests without Datadog context.
 ---
 
 # Datadog Query Skill
 
-This skill enables querying Datadog metrics and logs via the Datadog API.
+Query Datadog logs, metrics, and infrastructure using the `dd-cli` command-line tool.
 
-## Prerequisites
+## Scope
 
-**Required CLI tool:**
-- `dd-cli` (Datadog API client CLI)
-- Verify installation: `dd-cli --version`
+This skill is for **read-only queries** of Datadog observability data.
 
-**Required environment variables** (prompt user if not set):
-- `DD_API_KEY`: Datadog API key
-- `DD_APPLICATION_KEY`: Datadog Application key
-- `DD_SITE`: Datadog site (default: `datadoghq.com` if not set)
+**In scope:** Searching logs, listing hosts, querying metrics
+**Out of scope:** Dashboards, alerts, monitors, configuration changes, synthetics
 
-## Quick Start
+## When to Use This Skill
 
-### 0. Check Environment Variables (Without Exposing Keys)
+Use this skill IF AND ONLY IF the user mentions BOTH:
+1. **"Datadog" or "dd-cli"** (explicit tool reference)
+2. **An observability signal**: logs, metrics, hosts, errors, monitoring, traces
 
-```bash
-# Safely check if variables are set without displaying the keys
-echo "DD_API_KEY: ${DD_API_KEY:+set}" && echo "DD_APPLICATION_KEY: ${DD_APPLICATION_KEY:+set}" && echo "DD_SITE: ${DD_SITE:-datadoghq.com}"
-```
+**Valid trigger examples:**
+- "Check datadog logs for errors"
+- "Show me datadog hosts in production"
+- "Query datadog for service metrics"
+- "Get error logs from datadog"
+- "List datadog hosts that are down"
 
-Expected output if properly configured:
-```
-DD_API_KEY: set
-DD_APPLICATION_KEY: set
-DD_SITE: datadoghq.com
-```
+**NOT triggered by:**
+- "Show me the logs" (no Datadog mentioned → check local files)
+- "Check server status" (no Datadog mentioned → use host tools)
+- "Monitor the application" (no Datadog mentioned → too generic)
+- "Create a datadog dashboard" (out of scope)
 
-If any variable shows empty instead of "set", you need to export it.
+**If ambiguous:** Ask "Are you asking about Datadog monitoring?"
 
-### 1. Validate API Access
+## Execution Pattern
 
-```bash
-dd-cli validate | jq .
-```
+Follow this workflow for every request:
 
-Expected response: `{"valid": true}`
+1. **Validate credentials** (once per conversation)
+2. **Select appropriate command** (see decision tree)
+3. **Execute via Bash tool** with proper error handling
+4. **Process output** with jq
+5. **Present summary** to user (not raw JSON)
 
-### 2. Query Metrics
+## Credential Validation
 
-Get time-series data for the specified time range (Unix timestamps):
-
-```bash
-# Set time range (last hour by default)
-FROM=$(date -u -v-1H +%s 2>/dev/null || date -u -d '1 hour ago' +%s)
-TO=$(date -u +%s)
-
-# Query metric (URL encode the query parameter)
-QUERY=$(printf '%s' "avg:system.cpu.user{*}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq .
-```
-
-**Common metric queries:**
-- `avg:system.cpu.user{*}` - CPU usage across all hosts (0-100%)
-- `avg:system.mem.used{*}` - Memory usage (bytes)
-- `avg:system.disk.used{*}` - Disk usage (bytes)
-- `avg:system.load.1{*}` - 1-minute load average
-- `avg:kubernetes.cpu.usage.total{*}` - Kubernetes CPU (nanocores)
-- `avg:kubernetes.memory.usage{*}` - Kubernetes memory (bytes)
-- `avg:docker.cpu.usage{*}` - Docker container CPU
-
-**Tag filters:**
-- `{env:production}` - Filter by environment
-- `{project:violet}` - Filter by project
-- `{kube_namespace:default}` - Filter by K8s namespace
-- `{host:hostname}` - Filter by specific host
-- `{pod_name:mypod}` - Filter by pod name
-
-**Aggregations:**
-- `avg:metric{*}` - Average across all
-- `sum:metric{*}` - Sum across all
-- `max:metric{*}` / `min:metric{*}` - Max/min values
-- `avg:metric{*}by{host}` - Average per host
-- `avg:metric{*}by{kube_namespace}` - Average per namespace
-- `avg:metric{*}by{pod_name}` - Average per pod
-
-**Rollup functions (for time windows):**
-- `.rollup(avg, 300)` - 5-minute average windows
-- `.rollup(avg, 900)` - 15-minute average windows
-- `.rollup(max, 3600)` - 1-hour maximum windows
-- Example: `avg:system.cpu.user{*}by{host}.rollup(avg,900)`
-
-### 3. Query Logs
-
-Search logs with time range (ISO 8601 format):
+Run validation ONCE at the start of each conversation:
 
 ```bash
-# Set time range (last 15 minutes by default)
-FROM=$(date -u -v-15M +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)
-TO=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-
-# Query logs (basic JSON output)
-dd-cli --from "${FROM}" --to "${TO}" logs search -q "*" -n 10 | jq .
-```
-
-**Better formatted output with summary:**
-```bash
-# Get logs with a formatted summary
-FROM=$(date -u -v-1H +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)
-TO=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-
-dd-cli --from "${FROM}" --to "${TO}" logs search -q "service:myapp" -n 50 | jq -r '
-"=== LOG SUMMARY ===\n" +
-"Total entries: \(.data | length)\n" +
-"Time range: Last hour\n" +
-"\n=== LOG TYPES ===\n" +
-(.data | group_by(.attributes.status) | .[] |
-  "\(. | length) \(.[0].attributes.status) messages") +
-"\n\n=== RECENT ERRORS (if any) ===\n" +
-(.data | map(select(.attributes.status == "error" or .attributes.status == "warning")) | .[:5] | .[] |
-  "[\(.attributes.timestamp)] [\(.attributes.status | ascii_upcase)] \(.attributes.host // "no-host")\n  \(.attributes.message[:150])...\n"
-)'
-```
-
-**Common log queries:**
-- `*` - All logs
-- `status:error` - Error logs only
-- `status:warn OR status:error` - Warnings and errors
-- `env:production` - Logs from production environment
-- `service:myapp` - Logs from specific service
-- `host:*toolbox*` - Logs from hosts matching pattern
-- `kube_namespace:default` - Logs from K8s namespace
-- `@http.status_code:>=400` - HTTP errors (4xx/5xx)
-
-**Limit and pagination:**
-- Use `-n` to control results (default: 1000 without `--auto-paginate`, unlimited with)
-- Use `--auto-paginate` to fetch all matching logs across multiple pages
-- Use `--page-size` to control logs per API request (max: 1000)
-
-### 4. List Hosts
-
-Get active infrastructure hosts:
-
-```bash
-FROM=$(date -u -v-1H +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)
-
-dd-cli --from "${FROM}" host list | jq .
-```
-
-**Filter by tags:**
-```bash
-dd-cli --from "${FROM}" host list "env:production" | jq .
-```
-
-### 5. Search Metrics
-
-Find available metrics by pattern:
-
-```bash
-# Search for Kubernetes metrics
-QUERY=$(printf '%s' "metrics:kubernetes" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/search?q=${QUERY}" | jq .
-
-# Search for system metrics
-QUERY=$(printf '%s' "metrics:system" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/search?q=${QUERY}" | jq .
-```
-
-### 6. List Monitors
-
-View all configured monitors:
-
-```bash
-dd-cli raw GET /api/v1/monitor | jq .
-```
-
-### 7. List Dashboards
-
-View all configured dashboards:
-
-```bash
-dd-cli raw GET /api/v1/dashboard | jq .
-```
-
-## Common Workflows
-
-### Check Infrastructure Health
-
-```bash
-# 1. Validate credentials
-dd-cli validate | jq -r '.valid // "Authentication failed"'
-
-# 2. List active hosts
-FROM=$(date -u -v-1H +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)
-dd-cli --from "${FROM}" host list | jq '.host_list[] | {name: .name, up: .up, tags: .tags_by_source}'
-
-# 3. Check recent errors
-FROM=$(date -u -v-15M +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)
-TO=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-dd-cli --from "${FROM}" --to "${TO}" logs search -q "status:error" -n 10 | jq '.data[] | {timestamp: .attributes.timestamp, status: .attributes.status, message: .attributes.message}'
-```
-
-### Monitor System Metrics with Statistics
-
-```bash
-# CPU usage by host with min/avg/max/current
-FROM=$(date -u -v-1H +%s 2>/dev/null || date -u -d '1 hour ago' +%s)
-TO=$(date -u +%s)
-
-echo -e "=== SYSTEM METRICS SUMMARY (Last Hour) ===\n"
-echo -e "CPU Usage by Host:\nHost\tMin%\tAvg%\tMax%\tCurrent%"
-QUERY=$(printf '%s' "avg:system.cpu.user{*}by{host}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq -r '.series[]? | select(.pointlist | length > 0) | {host: .scope, points: .pointlist | map(.[1] // 0)} | {host: .host, min: (.points | min), avg: (.points | add / length), max: (.points | max), current: .points[-1]} | "\(.host)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)\t\(.current | floor)"' | column -t -s $'\t'
-```
-
-### Monitor Kubernetes Resources with Percentiles
-
-```bash
-FROM=$(date -u -v-30M +%s 2>/dev/null || date -u -d '30 minutes ago' +%s)
-TO=$(date -u +%s)
-
-# Top K8s pods by CPU (millicores) - filtered and sorted
-echo -e "=== TOP KUBERNETES PODS BY CPU (Last 30 min) ===\nPod\tMin(m)\tAvg(m)\tMax(m)\tCurrent(m)"
-QUERY=$(printf '%s' "avg:kubernetes.cpu.usage.total{*}by{pod_name}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq -r '.series[]? | select(.pointlist | length > 0) | {pod: (.scope | sub("pod_name:"; "")), points: .pointlist | map((.[1] // 0) / 1000000)} | {pod: .pod, min: (.points | min), avg: (.points | add / length), max: (.points | max), current: .points[-1]} | select(.avg > 10) | "\(.pod)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)\t\(.current | floor)"' | sort -t$'\t' -k3 -rn | column -t -s $'\t' | head -20
-
-# Memory usage by pod (MB)
-echo -e "\n=== KUBERNETES POD MEMORY (Last 30 min) ===\nPod\tMin(MB)\tAvg(MB)\tMax(MB)"
-QUERY=$(printf '%s' "avg:kubernetes.memory.usage{*}by{pod_name}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq -r '.series[]? | select(.pointlist | length > 0) | {pod: (.scope | sub("pod_name:"; "")), points: .pointlist | map((.[1] // 0) / 1048576)} | {pod: .pod, min: (.points | min), avg: (.points | add / length), max: (.points | max)} | "\(.pod)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)"' | sort -t$'\t' -k3 -rn | column -t -s $'\t' | head -15
-```
-
-### Analyze Resource Usage by Namespace
-
-```bash
-FROM=$(date -u -v-1H +%s 2>/dev/null || date -u -d '1 hour ago' +%s)
-TO=$(date -u +%s)
-
-# CPU usage aggregated by namespace
-echo -e "=== POD CPU BY NAMESPACE (Last Hour) ===\nNamespace\tMin(m)\tAvg(m)\tMax(m)"
-QUERY=$(printf '%s' "sum:kubernetes.cpu.usage.total{*}by{kube_namespace}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq -r '.series[]? | select(.pointlist | length > 0) | {ns: (.scope | sub("kube_namespace:"; "")), points: .pointlist | map((.[1] // 0) / 1000000)} | {ns: .ns, min: (.points | min), avg: (.points | add / length), max: (.points | max)} | "\(.ns)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)"' | sort -t$'\t' -k3 -rn | column -t -s $'\t'
-```
-
-### System Load with Percentiles
-
-```bash
-FROM=$(date -u -v-1H +%s 2>/dev/null || date -u -d '1 hour ago' +%s)
-TO=$(date -u +%s)
-
-# System load (1-min avg) with p95/p99
-echo -e "=== SYSTEM LOAD (1-min avg) BY HOST ===\nHost\tMin\tAvg\tMax\tP95\tP99"
-QUERY=$(printf '%s' "avg:system.load.1{*}by{host}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq -r '.series[]? | select(.pointlist | length > 0) | {host: (.scope | sub("host:"; "")), points: (.pointlist | map(.[1] // 0) | sort)} | {host: .host, min: (.points | min), avg: (.points | add / length), max: (.points | max), p95: .points[((.points | length) * 0.95) | floor], p99: .points[((.points | length) * 0.99) | floor]} | "\(.host)\t\(.min | . * 100 | floor / 100)\t\(.avg | . * 100 | floor / 100)\t\(.max | . * 100 | floor / 100)\t\(.p95 | . * 100 | floor / 100)\t\(.p99 | . * 100 | floor / 100)"' | column -t -s $'\t'
-```
-
-### Long-term Trends with Rollup
-
-```bash
-# 6-hour CPU trend with 15-minute windows
-FROM=$(date -u -v-6H +%s 2>/dev/null || date -u -d '6 hours ago' +%s)
-TO=$(date -u +%s)
-
-echo -e "=== KUBERNETES NODE CPU (6h, 15min rollup) ===\nNode\tMin%\tAvg%\tMax%"
-QUERY=$(printf '%s' "avg:kubernetes.cpu.usage.total{kube_cluster_name:*}by{host}.rollup(avg,900)" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq -r '.series[]? | select(.pointlist | length > 0) | {node: (.scope | sub("host:"; "")), points: .pointlist | map((.[1] // 0) / 1000000)} | {node: .node, min: (.points | min), avg: (.points | add / length), max: (.points | max)} | "\(.node)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)"' | column -t -s $'\t'
-```
-
-### Debug Application Issues
-
-```bash
-# 1. Find error patterns
-FROM=$(date -u -v-1H +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)
-TO=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-
-dd-cli --from "${FROM}" --to "${TO}" logs search -q "status:error service:myapp" -n 50 | jq '.data[] | {time: .attributes.timestamp, host: .attributes.host, message: .attributes.message}'
-
-# 2. Check service metrics
-FROM=$(date -u -v-1H +%s 2>/dev/null || date -u -d '1 hour ago' +%s)
-TO=$(date -u +%s)
-
-QUERY=$(printf '%s' "avg:trace.http.request.duration{service:myapp}" | jq -sRr @uri)
-dd-cli raw GET "/api/v1/query?from=${FROM}&to=${TO}&query=${QUERY}" | jq '.series[0].pointlist[-10:]'
-```
-
-### Analyze Log Distribution Across Infrastructure
-
-```bash
-# Get comprehensive log distribution summary
-FROM=$(date -u -v-30M +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)
-TO=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-
-dd-cli --from "${FROM}" --to "${TO}" logs search -q "*" -n 100 | jq -r '"=== LOG SUMMARY (Last 30 min) ===", "Total logs: \(.data | length)", "", "=== TOP SERVICES ===", (.data | group_by(.attributes.service) | map({service: .[0].attributes.service, count: length}) | sort_by(-.count) | .[0:10] | .[] | "  \(.count)\t\(.service)"), "", "=== TOP HOSTS ===", (.data | group_by(.attributes.host) | map({host: .[0].attributes.host, count: length}) | sort_by(-.count) | .[0:5] | .[] | "  \(.count)\t\(.host)")'
-```
-
-### Analyze Kubernetes Errors by Namespace
-
-```bash
-# Find and group K8s errors by namespace
-FROM=$(date -u -v-1H +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)
-TO=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-
-dd-cli --from "${FROM}" --to "${TO}" logs search -q "status:error OR status:warning kube_namespace:*" -n 50 | jq -r '"=== ERRORS & WARNINGS (Last Hour) ===", "Total: \(.data | length)", "", "=== BY NAMESPACE ===", (.data | group_by(.attributes.tags[] | select(startswith("kube_namespace:")) | split(":")[1]) | map({namespace: (.[0].attributes.tags[] | select(startswith("kube_namespace:")) | split(":")[1]), count: length}) | sort_by(-.count) | .[] | "  \(.count)\t\(.namespace)"), "", "=== RECENT ERRORS ===", (.data | .[0:5] | .[] | "[\(.attributes.timestamp)] \(.attributes.service // "no-service") on \(.attributes.host // "no-host")", "  Status: \(.attributes.status)", "  Message: \(.attributes.message[:120])...", "---")'
-```
-
-## Advanced jq Filters for Metrics
-
-These jq filters help process metric query results into statistical summaries:
-
-### Basic Statistics (Min/Avg/Max/Current)
-
-```bash
-# CPU usage by host with statistics
-jq -r '.series[]? | select(.pointlist | length > 0) | {host: (.scope | sub("host:"; "")), points: .pointlist | map(.[1] // 0)} | {host: .host, min: (.points | min), avg: (.points | add / length), max: (.points | max), current: .points[-1]} | "\(.host)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)\t\(.current | floor)"' | column -t -s $'\t'
-```
-
-### Unit Conversions
-
-```bash
-# Convert bytes to GB
-jq -r '.series[]? | {host: .scope, points: .pointlist | map((.[1] // 0) / 1073741824)}'
-
-# Convert bytes to MB
-jq -r '.series[]? | {host: .scope, points: .pointlist | map((.[1] // 0) / 1048576)}'
-
-# Convert nanocores to millicores (for K8s CPU)
-jq -r '.series[]? | {pod: .scope, points: .pointlist | map((.[1] // 0) / 1000000)}'
-```
-
-### Calculate Percentiles
-
-```bash
-# Calculate p95 and p99 from time series
-jq -r '.series[]? | select(.pointlist | length > 0) | {host: .scope, points: (.pointlist | map(.[1] // 0) | sort)} | {host: .host, p95: .points[((.points | length) * 0.95) | floor], p99: .points[((.points | length) * 0.99) | floor]} | "\(.host)\t\(.p95 | floor)\t\(.p99 | floor)"'
-```
-
-### Filter and Sort by Value
-
-```bash
-# Filter metrics above threshold and sort by average descending
-jq -r '.series[]? | select(.pointlist | length > 0) | {name: .scope, avg: (.pointlist | map(.[1] // 0) | add / length)} | select(.avg > 100) | "\(.avg | floor)\t\(.name)"' | sort -rn
-
-# Top N metrics by current value
-jq -r '.series[]? | {name: .scope, current: .pointlist[-1][1]} | "\(.current | floor)\t\(.name)"' | sort -rn | head -10
-```
-
-### Complete Summary Table
-
-```bash
-# Full statistics table with formatting
-jq -r '"Host\tMin%\tAvg%\tMax%\tCurrent%", ("-" * 80), (.series[]? | select(.pointlist | length > 0) | {host: (.scope | sub("host:"; "")), points: .pointlist | map(.[1] // 0)} | {host: .host, min: (.points | min), avg: (.points | add / length), max: (.points | max), current: .points[-1]} | "\(.host)\t\(.min | floor)\t\(.avg | floor)\t\(.max | floor)\t\(.current | floor)")' | column -t -s $'\t'
-```
-
-## Advanced jq Filters for Logs
-
-These jq filters help process log query results into useful summaries:
-
-### Aggregate by Service and Host
-```bash
-# Top services by log volume
-jq -r '"=== TOP SERVICES ===", (.data | group_by(.attributes.service) | map({service: .[0].attributes.service, count: length}) | sort_by(-.count) | .[0:10] | .[] | "  \(.count)\t\(.service)")'
-
-# Top hosts by log volume
-jq -r '"=== TOP HOSTS ===", (.data | group_by(.attributes.host) | map({host: .[0].attributes.host, count: length}) | sort_by(-.count) | .[0:10] | .[] | "  \(.count)\t\(.host)")'
-
-# Combined summary
-jq -r '"=== LOG SUMMARY ===", "Total logs: \(.data | length)", "", "=== TOP SERVICES ===", (.data | group_by(.attributes.service) | map({service: .[0].attributes.service, count: length}) | sort_by(-.count) | .[0:10] | .[] | "  \(.count)\t\(.service)"), "", "=== TOP HOSTS ===", (.data | group_by(.attributes.host) | map({host: .[0].attributes.host, count: length}) | sort_by(-.count) | .[0:5] | .[] | "  \(.count)\t\(.host)")'
-```
-
-### Group Errors by Kubernetes Namespace
-```bash
-# Errors grouped by K8s namespace
-jq -r '"=== ERRORS BY NAMESPACE ===", (.data | group_by(.attributes.tags[] | select(startswith("kube_namespace:")) | split(":")[1]) | map({namespace: (.[0].attributes.tags[] | select(startswith("kube_namespace:")) | split(":")[1]), count: length}) | sort_by(-.count) | .[] | "  \(.count)\t\(.namespace)")'
-```
-
-### Find Unique Error Patterns
-```bash
-# Extract and count unique error message patterns
-jq -r '"=== UNIQUE ERROR PATTERNS ===", (.data | [.[].attributes.message] | map(split(" ") | .[0:8] | join(" ")) | group_by(.) | map({pattern: .[0], count: length}) | sort_by(-.count) | .[0:10] | .[] | "  [\(.count)x] \(.pattern)...")'
-```
-
-### Group by Kubernetes Pods and Containers
-```bash
-# Logs by pod
-jq -r '"=== BY POD ===", (.data | map(select(.attributes.tags // [] | map(select(startswith("pod_name:"))) | length > 0)) | group_by(.attributes.tags[] | select(startswith("pod_name:")) | split(":")[1]) | map({pod: (.[0].attributes.tags[] | select(startswith("pod_name:")) | split(":")[1]), count: length}) | sort_by(-.count) | .[0:15] | .[] | "  \(.count)\t\(.pod)")'
-
-# Logs by container
-jq -r '"=== BY CONTAINER ===", (.data | map(select(.attributes.tags // [] | map(select(startswith("container_name:"))) | length > 0)) | group_by(.attributes.tags[] | select(startswith("container_name:")) | split(":")[1]) | map({container: (.[0].attributes.tags[] | select(startswith("container_name:")) | split(":")[1]), count: length}) | sort_by(-.count) | .[0:10] | .[] | "  \(.count)\t\(.container)")'
-```
-
-### Filter and Format Specific Fields
-```bash
-# Extract just timestamps and messages
-jq -r '.data[] | "[\(.attributes.timestamp)] \(.attributes.message)"'
-
-# Get logs from specific service with formatted output
-jq -r '.data | map(select(.attributes.service == "myapp")) | .[] | "[\(.attributes.timestamp)] [\(.attributes.status)] \(.attributes.message[:100])"'
-
-# Count logs by status
-jq -r '"=== BY STATUS ===", (.data | group_by(.attributes.status) | .[] | "  \(. | length)\t\(.[0].attributes.status)")'
-```
-
-## Tips
-
-**General:**
-- **Time ranges**: Use shorter ranges (15m-1h) for faster queries and recent data
-- **Date commands**: Script handles both macOS (`-v`) and Linux (`-d`) date formats
-- **Error handling**: Check HTTP status codes; 403 = auth issue, 400 = invalid query
-- **Variable safety**: Use `${VAR:+set}` to check if environment variables are set without exposing the values
-
-**Logs:**
-- **Pagination**: For logs, use `page.limit` and `page.cursor` for large result sets
-- **Tag filtering**: Narrow queries with tags to reduce noise and improve performance
-- **jq formatting**: Pipe to `jq .` for pretty output, or use specific selectors for focused data
-  - Group by status: `jq '.data | group_by(.attributes.status)'`
-  - Filter errors: `jq '.data | map(select(.attributes.status == "error"))'`
-  - Count logs: `jq '.data | length'`
-  - Extract messages: `jq -r '.data[] | .attributes.message'`
-
-**Metrics:**
-- **Rollup windows**: Use `.rollup(avg, SECONDS)` for aggregating over time windows (300=5min, 900=15min, 3600=1hr)
-- **Unit conversions**:
-  - K8s CPU: nanocores → millicores (divide by 1,000,000)
-  - Memory: bytes → MB (divide by 1,048,576), bytes → GB (divide by 1,073,741,824)
-- **Percentiles**: Calculate from sorted pointlist: `p95 = points[(length * 0.95) | floor]`
-- **Filtering**: Use `select(.avg > THRESHOLD)` to filter time series by calculated values
-- **Sorting**: Pipe jq output to `sort -t$'\t' -k3 -rn` to sort by 3rd column numerically descending
-- **Top N**: Combine sort with `head -N` to get top results
-- **Null handling**: Always use `.[1] // 0` when accessing pointlist values to handle nulls
-
-## Troubleshooting
-
-**Authentication failed:**
-```bash
-# Check environment variables (safe - doesn't expose keys)
-echo "DD_API_KEY: ${DD_API_KEY:+set}" && echo "DD_APPLICATION_KEY: ${DD_APPLICATION_KEY:+set}" && echo "DD_SITE: ${DD_SITE:-datadoghq.com}"
-
-# If you need to see partial keys for debugging (shows first 10 chars only)
-echo "DD_API_KEY: ${DD_API_KEY:0:10}..."
-echo "DD_APPLICATION_KEY: ${DD_APPLICATION_KEY:0:10}..."
-
-# Validate credentials
 dd-cli validate
 ```
 
-**No data returned:**
-- Verify time range is recent and contains data
-- Check tag filters match your infrastructure
-- Try broader queries first (e.g., `{*}` instead of specific tags)
-- Use metric search to verify metric names
+**Expected output:** `{"valid":true}`
 
-**Query timeout:**
-- Reduce time range
-- Add more specific tag filters
-- Lower page limit for log queries
+**If `{"valid":false}`:**
+1. Stop execution immediately
+2. Tell user: "Datadog API credentials are missing or invalid. Check DD_API_KEY and DD_APPLICATION_KEY environment variables."
+3. Wait for user to fix credentials
+4. Do NOT proceed with queries
 
-## API Reference
+**Do NOT re-validate on every command.**
 
-- **Docs**: https://docs.datadoghq.com/api/latest/
-- **Metrics API**: https://docs.datadoghq.com/api/latest/metrics/
-- **Logs API**: https://docs.datadoghq.com/api/latest/logs/
-- **Query syntax**: https://docs.datadoghq.com/dashboards/querying/
+**Required environment variables:**
+- `DD_API_KEY` - Datadog API key
+- `DD_APPLICATION_KEY` - Application key with scopes: `logs_read_data`, `hosts_read`
+
+## Command Selection Decision Tree
+
+Use this decision tree to select the correct command:
+
+1. **Validate credentials?**
+   → `dd-cli validate`
+
+2. **List hosts/servers?**
+   → `dd-cli --from 1h host list [filter]`
+
+3. **Get specific host details?**
+   → `dd-cli host get "<hostname>"`
+
+4. **Search logs?**
+   → `dd-cli --from <time> logs search --query "<query>" [--limit N]`
+
+5. **Get metrics (CPU/memory)?**
+   → `dd-cli raw --method GET --path "/api/v1/query" --query "..."`
+
+If user request doesn't fit these categories, ask for clarification.
+
+## Command Reference
+
+### logs search
+
+Search and retrieve log events with pagination.
+
+**Single page (default):**
+```bash
+# Recent errors (fast, up to 1000 logs)
+dd-cli --from 15m logs search --query "status:error" --limit 50
+
+# Service logs from last hour
+dd-cli --from 1h logs search --query "service:web"
+```
+
+**Multi-page (for >1000 logs):**
+```bash
+# Comprehensive search (slower, ALWAYS set --limit)
+dd-cli --from 1d logs search --query "service:api" --auto-paginate --limit 5000
+```
+
+**Key options:**
+- `-q, --query` - Search query (default: `*`)
+- `-n, --limit` - Max logs to return (default: 1000 single page, unlimited with --auto-paginate)
+- `--auto-paginate` - Fetch multiple pages (use ONLY when you need >1000 logs)
+- `--page-size` - Logs per request (max: 1000)
+
+**Output format:** Newline-delimited JSON (NDJSON) - one log per line
+
+**Query syntax examples:**
+
+| Pattern | Description |
+|---------|-------------|
+| `service:name` | Filter by service |
+| `status:error` | Error logs only |
+| `status:warn OR status:error` | Warnings and errors |
+| `host:hostname` | Logs from specific host |
+| `kube_namespace:default` | Kubernetes namespace |
+| `@http.status_code:>=500` | HTTP 5xx errors |
+| `*` | All logs (default) |
+
+### host list
+
+List active infrastructure hosts.
+
+**Usage:**
+```bash
+# Active hosts in last hour (REQUIRED: --from flag)
+dd-cli --from 1h host list
+
+# Filter by environment
+dd-cli --from 1h host list "env:production"
+
+# Active hosts in last day
+dd-cli --from 1d host list
+```
+
+**Note:** The `--from` flag is REQUIRED for this command.
+
+### host get
+
+Get details for a specific host.
+
+**Usage:**
+```bash
+dd-cli host get "hostname.example.com"
+```
+
+### raw
+
+Direct API access for metrics and advanced queries.
+
+**Metrics query (uses Unix timestamps):**
+```bash
+dd-cli raw --method GET --path "/api/v1/query" \
+  --query "from=<unix_start>&to=<unix_end>&query=avg%3Asystem.cpu.user%7B*%7D"
+```
+
+**Common metrics:**
+
+| Metric | Description | Units |
+|--------|-------------|-------|
+| `system.cpu.user{*}` | CPU usage | 0-100% |
+| `system.mem.used{*}` | Memory used | bytes |
+| `system.load.1{*}` | Load average (1 min) | float |
+| `kubernetes.cpu.usage.total{*}` | K8s CPU | nanocores |
+| `kubernetes.memory.usage{*}` | K8s memory | bytes |
+
+**Aggregation patterns:**
+- `avg:metric{*}` - Average across all
+- `max:metric{*}` - Maximum value
+- `avg:metric{*}by{host}` - Per-host average
+- `avg:metric{*}by{kube_namespace}` - Per-namespace average
+
+**Note:** URL-encode metrics queries (e.g., `avg%3Asystem.cpu.user%7B*%7D`)
+
+### validate
+
+Validate API credentials.
+
+**Usage:**
+```bash
+dd-cli validate
+```
+
+## Timestamp Formats
+
+**Default: Use relative time for all commands**
+```bash
+--from 15m   # 15 minutes ago
+--from 1h    # 1 hour ago
+--from 1d    # 1 day ago
+--from 1w    # 1 week ago
+```
+
+**Supported units:**
+- Minutes: `m`, `min`, `mins`, `minute`, `minutes`
+- Hours: `h`, `hr`, `hrs`, `hour`, `hours`
+- Days: `d`, `day`, `days`
+- Weeks: `w`, `week`, `weeks`
+- Months: `mo`, `mos`, `mon`, `mons`, `month`, `months`
+
+**The `--to` flag defaults to current time if not specified.**
+
+**Exception: ISO 8601 format** (only when user provides specific dates/times)
+```bash
+--from 2026-02-15T14:00:00Z --to 2026-02-15T15:00:00Z
+```
+
+**Exception: Unix epoch** (only for `raw` metrics API)
+```bash
+from=1739628000&to=1739631600  # In query string
+```
+
+## Output Processing
+
+Always pipe dd-cli output through jq for user-friendly formatting.
+
+**Small result sets (<20 logs) - Show directly:**
+```bash
+dd-cli --from 30m logs search --query "status:error" --limit 10 | \
+  jq -r '"[\(.attributes.timestamp)] \(.attributes.service): \(.attributes.message)"'
+```
+
+**Large result sets (>20 logs) - Summarize:**
+```bash
+# Count by service
+dd-cli --from 1h logs search --query "*" --limit 200 | \
+  jq -r '.attributes.service' | sort | uniq -c | sort -rn
+
+# Count by status
+dd-cli --from 1h logs search --query "*" --limit 200 | \
+  jq -r '.attributes.status' | sort | uniq -c | sort -rn
+```
+
+**Host lists - Show key info:**
+```bash
+dd-cli --from 1h host list | \
+  jq -r '.host_list[] | "\(.name) - UP: \(.up)"'
+```
+
+**Metrics - Convert units:**
+- K8s CPU: nanocores ÷ 1,000,000 = millicores
+- Memory: bytes ÷ 1,048,576 = MB
+- Always explain converted values: "CPU: 45%" not raw nanocores
+
+**Present summaries to users, not raw JSON dumps.**
+
+## Error Handling
+
+If a command fails:
+1. Read the error message
+2. Match against common errors below
+3. Tell user the specific problem and solution
+4. Do NOT retry automatically
+
+**Common errors and solutions:**
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `command not found: dd-cli` | Tool not installed | Tell user: "dd-cli is not installed. Install from: [instructions]" |
+| `{"valid":false}` | Invalid credentials | Tell user: "Datadog API keys are invalid. Check DD_API_KEY and DD_APPLICATION_KEY environment variables." |
+| `error: --from flag is required` | Missing timestamp | Add `--from 1h` to the command |
+| `invalid timestamp format` | Wrong format used | Use relative time (`--from 1h`) not Unix epoch |
+| `401 Unauthorized` | Auth failure | Run `dd-cli validate` to confirm credentials |
+| `API error` | Various API issues | Check error details and inform user |
+
+**Do NOT retry failed commands automatically. Wait for user to fix the underlying issue.**
+
+## Quick Command Patterns
+
+| User Request | Command Template |
+|--------------|------------------|
+| Recent errors | `dd-cli --from 15m logs search --query "status:error" --limit 50` |
+| Service logs | `dd-cli --from 1h logs search --query "service:<name>" --limit 100` |
+| Active hosts | `dd-cli --from 1h host list` |
+| Specific host | `dd-cli host get "<hostname>"` |
+| K8s namespace logs | `dd-cli --from 30m logs search --query "kube_namespace:<name>" --limit 100` |
+| Warnings + Errors | `dd-cli --from 1h logs search --query "status:warn OR status:error" --limit 100` |
+
+## Best Practices
+
+1. **Start with validation** - Run `dd-cli validate` once per conversation
+2. **Use relative time** - `--from 1h` is simpler than absolute timestamps
+3. **Shorter time ranges = faster** - Start with `--from 15m`, expand if needed
+4. **Default to single-page** - Only use `--auto-paginate` when you need >1000 logs
+5. **Always set --limit with --auto-paginate** - Prevents excessive data retrieval
+6. **Process with jq** - Always format output for users
+7. **Summarize large results** - Don't dump 1000 logs, show patterns/counts

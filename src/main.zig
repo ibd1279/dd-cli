@@ -19,6 +19,8 @@ const Config = struct {
 
     fn deinit(self: *Config) void {
         if (self.dd_domain_owned) |domain| self.allocator.free(domain);
+        if (self.from_timestamp) |ts| self.allocator.free(ts);
+        if (self.to_timestamp) |ts| self.allocator.free(ts);
         self.allocator.free(self.api_key);
         self.allocator.free(self.app_key);
     }
@@ -47,6 +49,151 @@ const LogsPage = struct {
 };
 
 // ============================================================================
+// Time Parsing Helpers
+// ============================================================================
+
+const TimeUnit = enum {
+    minutes,
+    hours,
+    days,
+    weeks,
+    months,
+};
+
+const RelativeTime = struct {
+    value: i64,
+    unit: TimeUnit,
+};
+
+/// Parse a relative time string like "1d", "2hours", "3w" into value and unit
+fn parseRelativeTime(input: []const u8) !RelativeTime {
+    if (input.len == 0) return error.InvalidRelativeTime;
+
+    // Find where the number ends and unit begins
+    var num_end: usize = 0;
+    while (num_end < input.len and std.ascii.isDigit(input[num_end])) {
+        num_end += 1;
+    }
+
+    if (num_end == 0) return error.InvalidRelativeTime;
+
+    const value = try std.fmt.parseInt(i64, input[0..num_end], 10);
+    const unit_str = input[num_end..];
+
+    if (unit_str.len == 0) return error.InvalidRelativeTime;
+
+    // Parse unit (case-insensitive)
+    const unit = blk: {
+        // Minutes: m, min, mins, minute, minutes
+        if (std.ascii.eqlIgnoreCase(unit_str, "m") or
+            std.ascii.eqlIgnoreCase(unit_str, "min") or
+            std.ascii.eqlIgnoreCase(unit_str, "mins") or
+            std.ascii.eqlIgnoreCase(unit_str, "minute") or
+            std.ascii.eqlIgnoreCase(unit_str, "minutes"))
+        {
+            break :blk TimeUnit.minutes;
+        }
+        // Hours: h, hr, hrs, hour, hours
+        if (std.ascii.eqlIgnoreCase(unit_str, "h") or
+            std.ascii.eqlIgnoreCase(unit_str, "hr") or
+            std.ascii.eqlIgnoreCase(unit_str, "hrs") or
+            std.ascii.eqlIgnoreCase(unit_str, "hour") or
+            std.ascii.eqlIgnoreCase(unit_str, "hours"))
+        {
+            break :blk TimeUnit.hours;
+        }
+        // Days: d, day, days
+        if (std.ascii.eqlIgnoreCase(unit_str, "d") or
+            std.ascii.eqlIgnoreCase(unit_str, "day") or
+            std.ascii.eqlIgnoreCase(unit_str, "days"))
+        {
+            break :blk TimeUnit.days;
+        }
+        // Weeks: w, week, weeks
+        if (std.ascii.eqlIgnoreCase(unit_str, "w") or
+            std.ascii.eqlIgnoreCase(unit_str, "week") or
+            std.ascii.eqlIgnoreCase(unit_str, "weeks"))
+        {
+            break :blk TimeUnit.weeks;
+        }
+        // Months: mo, mos, mon, mons, month, months
+        if (std.ascii.eqlIgnoreCase(unit_str, "mo") or
+            std.ascii.eqlIgnoreCase(unit_str, "mos") or
+            std.ascii.eqlIgnoreCase(unit_str, "mon") or
+            std.ascii.eqlIgnoreCase(unit_str, "mons") or
+            std.ascii.eqlIgnoreCase(unit_str, "month") or
+            std.ascii.eqlIgnoreCase(unit_str, "months"))
+        {
+            break :blk TimeUnit.months;
+        }
+        return error.InvalidTimeUnit;
+    };
+
+    return RelativeTime{ .value = value, .unit = unit };
+}
+
+/// Convert relative time to seconds offset
+fn relativeTimeToSeconds(rel_time: RelativeTime) i64 {
+    return switch (rel_time.unit) {
+        .minutes => rel_time.value * 60,
+        .hours => rel_time.value * 3600,
+        .days => rel_time.value * 86400,
+        .weeks => rel_time.value * 604800,
+        .months => rel_time.value * 2592000, // 30 days
+    };
+}
+
+/// Format Unix timestamp to ISO 8601 string (UTC)
+fn formatTimestamp(allocator: std.mem.Allocator, timestamp: i64) ![]const u8 {
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const epoch_day = epoch_seconds.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+
+    return std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
+}
+
+/// Parse time argument - either relative (e.g., "1d") or absolute (ISO 8601)
+/// Returns owned string that caller must free
+fn parseTimeArg(allocator: std.mem.Allocator, arg: ?[]const u8, current_time: i64, is_from: bool) !?[]const u8 {
+    const input = arg orelse {
+        // If no arg provided and this is 'to', default to current time
+        if (!is_from) {
+            return try formatTimestamp(allocator, current_time);
+        }
+        return null;
+    };
+
+    // Check if it looks like a relative time (starts with digit)
+    if (input.len > 0 and std.ascii.isDigit(input[0])) {
+        const rel_time = parseRelativeTime(input) catch {
+            // Not a relative time, treat as absolute timestamp
+            return try allocator.dupe(u8, input);
+        };
+
+        // Convert to absolute timestamp (subtract from current time for 'from')
+        const offset = relativeTimeToSeconds(rel_time);
+        const timestamp = current_time - offset;
+        return try formatTimestamp(allocator, timestamp);
+    }
+
+    // Not a relative time, treat as absolute timestamp
+    return try allocator.dupe(u8, input);
+}
+
+// ============================================================================
 // Configuration Helpers
 // ============================================================================
 
@@ -60,8 +207,19 @@ fn initConfig(
     var config: Config = undefined;
     config.allocator = allocator;
     config.dd_domain_owned = null;
-    config.from_timestamp = from_arg;
-    config.to_timestamp = to_arg;
+
+    // Get current time for relative time calculations
+    const current_time = std.time.timestamp();
+
+    // Parse time arguments (handles both relative and absolute)
+    const from_timestamp = try parseTimeArg(allocator, from_arg, current_time, true);
+    errdefer if (from_timestamp) |ts| allocator.free(ts);
+
+    const to_timestamp = try parseTimeArg(allocator, to_arg, current_time, false);
+    errdefer if (to_timestamp) |ts| allocator.free(ts);
+
+    config.from_timestamp = from_timestamp;
+    config.to_timestamp = to_timestamp;
 
     // Priority: CLI arg > DD_SITE env > "datadoghq.com"
     config.dd_domain = blk: {
@@ -932,8 +1090,8 @@ pub fn main() !void {
 
     // Global flags
     try root.addArg(Arg.singleValueOption("domain", 'd', "Datadog domain (e.g., datadoghq.com, datadoghq.eu)"));
-    try root.addArg(Arg.singleValueOption("from", null, "Start time in ISO 8601 format (e.g., 2024-01-15T10:00:00Z)"));
-    try root.addArg(Arg.singleValueOption("to", null, "End time in ISO 8601 format (e.g., 2024-01-15T11:00:00Z)"));
+    try root.addArg(Arg.singleValueOption("from", null, "Start time: relative (e.g., 1d, 2hours) or ISO 8601 (e.g., 2024-01-15T10:00:00Z)"));
+    try root.addArg(Arg.singleValueOption("to", null, "End time: relative (e.g., 1h) or ISO 8601 (defaults to current time if not specified)"));
 
     // Raw command - low-level API access
     var raw_cmd = app.createCommand("raw", "Low-level API access with full control");
@@ -1278,4 +1436,132 @@ test "buildLogsSearchBody - multiple indexes" {
     try std.testing.expectEqualStrings("main", indexes.items[0].string);
     try std.testing.expectEqualStrings("staging", indexes.items[1].string);
     try std.testing.expectEqualStrings("prod", indexes.items[2].string);
+}
+
+test "parseRelativeTime - minutes" {
+    const t1 = try parseRelativeTime("5m");
+    try std.testing.expectEqual(@as(i64, 5), t1.value);
+    try std.testing.expectEqual(TimeUnit.minutes, t1.unit);
+
+    const t2 = try parseRelativeTime("10mins");
+    try std.testing.expectEqual(@as(i64, 10), t2.value);
+    try std.testing.expectEqual(TimeUnit.minutes, t2.unit);
+
+    const t3 = try parseRelativeTime("1minute");
+    try std.testing.expectEqual(@as(i64, 1), t3.value);
+    try std.testing.expectEqual(TimeUnit.minutes, t3.unit);
+}
+
+test "parseRelativeTime - hours" {
+    const t1 = try parseRelativeTime("2h");
+    try std.testing.expectEqual(@as(i64, 2), t1.value);
+    try std.testing.expectEqual(TimeUnit.hours, t1.unit);
+
+    const t2 = try parseRelativeTime("24hours");
+    try std.testing.expectEqual(@as(i64, 24), t2.value);
+    try std.testing.expectEqual(TimeUnit.hours, t2.unit);
+
+    const t3 = try parseRelativeTime("1hr");
+    try std.testing.expectEqual(@as(i64, 1), t3.value);
+    try std.testing.expectEqual(TimeUnit.hours, t3.unit);
+}
+
+test "parseRelativeTime - days" {
+    const t1 = try parseRelativeTime("1d");
+    try std.testing.expectEqual(@as(i64, 1), t1.value);
+    try std.testing.expectEqual(TimeUnit.days, t1.unit);
+
+    const t2 = try parseRelativeTime("7days");
+    try std.testing.expectEqual(@as(i64, 7), t2.value);
+    try std.testing.expectEqual(TimeUnit.days, t2.unit);
+}
+
+test "parseRelativeTime - weeks" {
+    const t1 = try parseRelativeTime("1w");
+    try std.testing.expectEqual(@as(i64, 1), t1.value);
+    try std.testing.expectEqual(TimeUnit.weeks, t1.unit);
+
+    const t2 = try parseRelativeTime("2weeks");
+    try std.testing.expectEqual(@as(i64, 2), t2.value);
+    try std.testing.expectEqual(TimeUnit.weeks, t2.unit);
+}
+
+test "parseRelativeTime - months" {
+    const t1 = try parseRelativeTime("1mo");
+    try std.testing.expectEqual(@as(i64, 1), t1.value);
+    try std.testing.expectEqual(TimeUnit.months, t1.unit);
+
+    const t2 = try parseRelativeTime("3months");
+    try std.testing.expectEqual(@as(i64, 3), t2.value);
+    try std.testing.expectEqual(TimeUnit.months, t2.unit);
+
+    const t3 = try parseRelativeTime("6mos");
+    try std.testing.expectEqual(@as(i64, 6), t3.value);
+    try std.testing.expectEqual(TimeUnit.months, t3.unit);
+}
+
+test "parseRelativeTime - invalid inputs" {
+    try std.testing.expectError(error.InvalidRelativeTime, parseRelativeTime(""));
+    try std.testing.expectError(error.InvalidRelativeTime, parseRelativeTime("d"));
+    try std.testing.expectError(error.InvalidTimeUnit, parseRelativeTime("5x"));
+    try std.testing.expectError(error.InvalidTimeUnit, parseRelativeTime("10years"));
+}
+
+test "relativeTimeToSeconds" {
+    const minutes = RelativeTime{ .value = 5, .unit = .minutes };
+    try std.testing.expectEqual(@as(i64, 300), relativeTimeToSeconds(minutes));
+
+    const hours = RelativeTime{ .value = 2, .unit = .hours };
+    try std.testing.expectEqual(@as(i64, 7200), relativeTimeToSeconds(hours));
+
+    const days = RelativeTime{ .value = 1, .unit = .days };
+    try std.testing.expectEqual(@as(i64, 86400), relativeTimeToSeconds(days));
+
+    const weeks = RelativeTime{ .value = 1, .unit = .weeks };
+    try std.testing.expectEqual(@as(i64, 604800), relativeTimeToSeconds(weeks));
+
+    const months = RelativeTime{ .value = 1, .unit = .months };
+    try std.testing.expectEqual(@as(i64, 2592000), relativeTimeToSeconds(months));
+}
+
+test "formatTimestamp" {
+    // Test a known timestamp: 2024-01-01 00:00:00 UTC
+    const timestamp: i64 = 1704067200;
+    const formatted = try formatTimestamp(std.testing.allocator, timestamp);
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expectEqualStrings("2024-01-01T00:00:00Z", formatted);
+}
+
+test "parseTimeArg - relative time from" {
+    const current_time: i64 = 1704067200; // 2024-01-01 00:00:00 UTC
+    const result = try parseTimeArg(std.testing.allocator, "1d", current_time, true);
+    defer if (result) |r| std.testing.allocator.free(r);
+
+    // Should be 24 hours earlier: 2023-12-31 00:00:00 UTC
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("2023-12-31T00:00:00Z", result.?);
+}
+
+test "parseTimeArg - absolute time" {
+    const current_time: i64 = 1704067200;
+    const result = try parseTimeArg(std.testing.allocator, "2024-01-15T10:00:00Z", current_time, true);
+    defer if (result) |r| std.testing.allocator.free(r);
+
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("2024-01-15T10:00:00Z", result.?);
+}
+
+test "parseTimeArg - null from returns null" {
+    const current_time: i64 = 1704067200;
+    const result = try parseTimeArg(std.testing.allocator, null, current_time, true);
+    try std.testing.expect(result == null);
+}
+
+test "parseTimeArg - null to defaults to current time" {
+    const current_time: i64 = 1704067200; // 2024-01-01 00:00:00 UTC
+    const result = try parseTimeArg(std.testing.allocator, null, current_time, false);
+    defer if (result) |r| std.testing.allocator.free(r);
+
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("2024-01-01T00:00:00Z", result.?);
 }

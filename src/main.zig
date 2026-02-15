@@ -34,6 +34,18 @@ const CustomHeader = struct {
     value: []const u8,
 };
 
+const LogsFilter = struct {
+    from: ?[]const u8, // ISO 8601 timestamp, optional
+    to: ?[]const u8, // ISO 8601 timestamp, optional
+    query: []const u8, // Search query string
+    indexes: []const []const u8, // Array of index names
+};
+
+const LogsPage = struct {
+    cursor: ?[]const u8, // Pagination cursor (null for first page)
+    limit: usize, // Logs per request (max 1000)
+};
+
 // ============================================================================
 // Configuration Helpers
 // ============================================================================
@@ -80,9 +92,9 @@ fn initConfig(
         return err;
     };
 
-    config.app_key = std.process.getEnvVarOwned(allocator, "DD_APP_API_KEY") catch |err| {
+    config.app_key = std.process.getEnvVarOwned(allocator, "DD_APPLICATION_KEY") catch |err| {
         allocator.free(config.api_key);
-        std.debug.print("Error: DD_APP_API_KEY environment variable not set\n", .{});
+        std.debug.print("Error: DD_APPLICATION_KEY environment variable not set\n", .{});
         std.debug.print("Required for API read operations\n", .{});
         return err;
     };
@@ -343,6 +355,310 @@ fn writeOutput(response: []const u8) !void {
 }
 
 // ============================================================================
+// Logs API Helpers
+// ============================================================================
+
+// Datadog Logs API constants
+const DATADOG_MAX_PAGE_SIZE: usize = 1000;
+const DATADOG_DEFAULT_PAGE_SIZE: usize = 1000;
+
+/// Escape a string for JSON (handles all control characters)
+fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    for (input) |c| {
+        switch (c) {
+            '"' => try result.appendSlice(allocator, "\\\""),
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            '\x08' => try result.appendSlice(allocator, "\\b"),
+            '\x0C' => try result.appendSlice(allocator, "\\f"),
+            0x00...0x07, 0x0B, 0x0E...0x1F => {
+                try result.writer(allocator).print("\\u{x:0>4}", .{c});
+            },
+            else => try result.append(allocator, c),
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
+/// Build JSON request body for logs search API
+fn buildLogsSearchBody(
+    arena: std.mem.Allocator,
+    filter: LogsFilter,
+    page: LogsPage,
+    sort: ?[]const u8,
+) ![]const u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(arena);
+
+    try body.appendSlice(arena, "{\"filter\":{");
+
+    // Add query
+    try body.appendSlice(arena, "\"query\":\"");
+    const escaped_query = try jsonEscape(arena, filter.query);
+    try body.appendSlice(arena, escaped_query);
+    try body.appendSlice(arena, "\"");
+
+    // Add indexes
+    try body.appendSlice(arena, ",\"indexes\":[");
+    for (filter.indexes, 0..) |index, i| {
+        if (i > 0) try body.appendSlice(arena, ",");
+        try body.appendSlice(arena, "\"");
+        const escaped_index = try jsonEscape(arena, index);
+        try body.appendSlice(arena, escaped_index);
+        try body.appendSlice(arena, "\"");
+    }
+    try body.appendSlice(arena, "]");
+
+    // Add optional time range
+    if (filter.from) |from| {
+        try body.appendSlice(arena, ",\"from\":\"");
+        const escaped_from = try jsonEscape(arena, from);
+        try body.appendSlice(arena, escaped_from);
+        try body.appendSlice(arena, "\"");
+    }
+    if (filter.to) |to| {
+        try body.appendSlice(arena, ",\"to\":\"");
+        const escaped_to = try jsonEscape(arena, to);
+        try body.appendSlice(arena, escaped_to);
+        try body.appendSlice(arena, "\"");
+    }
+
+    try body.appendSlice(arena, "},\"page\":{");
+
+    // Add page limit
+    const limit_str = try std.fmt.allocPrint(arena, "{d}", .{page.limit});
+    try body.appendSlice(arena, "\"limit\":");
+    try body.appendSlice(arena, limit_str);
+
+    // Add cursor if present
+    if (page.cursor) |cursor| {
+        try body.appendSlice(arena, ",\"cursor\":\"");
+        const escaped_cursor = try jsonEscape(arena, cursor);
+        try body.appendSlice(arena, escaped_cursor);
+        try body.appendSlice(arena, "\"");
+    }
+
+    try body.appendSlice(arena, "}");
+
+    // Add sort if present
+    if (sort) |s| {
+        try body.appendSlice(arena, ",\"sort\":\"");
+        const escaped_sort = try jsonEscape(arena, s);
+        try body.appendSlice(arena, escaped_sort);
+        try body.appendSlice(arena, "\"");
+    }
+
+    try body.appendSlice(arena, "}");
+
+    return body.toOwnedSlice(arena);
+}
+
+/// Convert a std.json.Value to JSON string
+fn valueToJson(allocator: std.mem.Allocator, value: std.json.Value) error{OutOfMemory}![]const u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    try valueToJsonWriter(allocator, value, &result);
+    return result.toOwnedSlice(allocator);
+}
+
+fn valueToJsonWriter(allocator: std.mem.Allocator, value: std.json.Value, list: *std.ArrayList(u8)) error{OutOfMemory}!void {
+    switch (value) {
+        .null => try list.appendSlice(allocator, "null"),
+        .bool => |b| try list.appendSlice(allocator, if (b) "true" else "false"),
+        .integer => |i| {
+            const str = try std.fmt.allocPrint(allocator, "{d}", .{i});
+            defer allocator.free(str);
+            try list.appendSlice(allocator, str);
+        },
+        .float => |f| {
+            const str = try std.fmt.allocPrint(allocator, "{d}", .{f});
+            defer allocator.free(str);
+            try list.appendSlice(allocator, str);
+        },
+        .number_string => |ns| try list.appendSlice(allocator, ns),
+        .string => |s| {
+            try list.append(allocator, '"');
+            const escaped = try jsonEscape(allocator, s);
+            defer allocator.free(escaped);
+            try list.appendSlice(allocator, escaped);
+            try list.append(allocator, '"');
+        },
+        .array => |arr| {
+            try list.append(allocator, '[');
+            for (arr.items, 0..) |item, i| {
+                if (i > 0) try list.append(allocator, ',');
+                try valueToJsonWriter(allocator, item, list);
+            }
+            try list.append(allocator, ']');
+        },
+        .object => |obj| {
+            try list.append(allocator, '{');
+            var first = true;
+            var iter = obj.iterator();
+            while (iter.next()) |entry| {
+                if (!first) try list.append(allocator, ',');
+                first = false;
+                try list.append(allocator, '"');
+                const escaped_key = try jsonEscape(allocator, entry.key_ptr.*);
+                defer allocator.free(escaped_key);
+                try list.appendSlice(allocator, escaped_key);
+                try list.appendSlice(allocator, "\":");
+                try valueToJsonWriter(allocator, entry.value_ptr.*, list);
+            }
+            try list.append(allocator, '}');
+        },
+    }
+}
+
+/// Write a single log line as JSON to stdout with immediate flush
+fn writeLogLine(allocator: std.mem.Allocator, log_value: std.json.Value) !void {
+    const json_str = try valueToJson(allocator, log_value);
+    defer allocator.free(json_str);
+
+    const stdout_file = std.fs.File.stdout();
+    try stdout_file.writeAll(json_str);
+    try stdout_file.writeAll("\n");
+}
+
+/// Stream logs with automatic pagination
+fn streamLogsSearch(
+    allocator: std.mem.Allocator,
+    url_base: []const u8,
+    headers: []const std.http.Header,
+    filter: LogsFilter,
+    page_limit: usize,
+    sort: ?[]const u8,
+    limit: ?usize, // null = unlimited
+    auto_paginate: bool,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var total_output: usize = 0;
+    var cursor: ?[]const u8 = null;
+    defer if (cursor) |c| allocator.free(c); // Free cursor at end of function
+    var page_num: usize = 1;
+
+    while (true) {
+        // Check if we've hit the limit
+        if (limit) |max| {
+            if (total_output >= max) break;
+        }
+
+        // Build request body with current cursor
+        const page = LogsPage{
+            .cursor = cursor,
+            .limit = page_limit,
+        };
+        const body = try buildLogsSearchBody(arena.allocator(), filter, page, sort);
+
+        // Execute request
+        var client: std.http.Client = .{
+            .allocator = arena.allocator(),
+        };
+        defer client.deinit();
+
+        var body_writer = std.Io.Writer.Allocating.init(arena.allocator());
+        defer body_writer.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url_base },
+            .method = .POST,
+            .extra_headers = headers,
+            .response_writer = &body_writer.writer,
+            .payload = body,
+        }) catch |err| {
+            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
+            std.debug.print("Successfully retrieved {d} logs before failure.\n", .{total_output});
+            std.debug.print("Network error: {}\n", .{err});
+            return err;
+        };
+
+        // Check response status
+        if (result.status != .ok) {
+            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
+            const response_body = body_writer.written();
+            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
+                std.debug.print("Response: {s}\n", .{response_body});
+            }
+            if (result.status == .too_many_requests) {
+                std.debug.print("Successfully retrieved {d} logs before rate limit.\n", .{total_output});
+                std.debug.print("Consider reducing --limit or narrowing --query to reduce data volume.\n", .{});
+            } else if (page_num > 1) {
+                std.debug.print("Successfully retrieved {d} logs before failure.\n", .{total_output});
+            }
+            return error.RequestFailed;
+        }
+
+        // Parse response
+        const response_body = body_writer.written();
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            arena.allocator(),
+            response_body,
+            .{},
+        ) catch |err| {
+            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
+            std.debug.print("Successfully retrieved {d} logs before failure.\n", .{total_output});
+            return err;
+        };
+        defer parsed.deinit();
+
+        // Extract data array
+        const data_array = if (parsed.value.object.get("data")) |data|
+            if (data == .array) data.array else return error.InvalidResponse
+        else
+            return error.InvalidResponse;
+
+        // Stream each log
+        for (data_array.items) |log| {
+            // Check limit before output
+            if (limit) |max| {
+                if (total_output >= max) break;
+            }
+
+            try writeLogLine(allocator, log);
+            total_output += 1;
+        }
+
+        // Check if we should continue pagination
+        if (!auto_paginate) break; // Single page mode
+
+        // Extract next cursor
+        const next_cursor = if (parsed.value.object.get("meta")) |meta|
+            if (meta.object.get("page")) |page_meta|
+                if (page_meta.object.get("after")) |after|
+                    if (after == .string) after.string else null
+                else
+                    null
+            else
+                null
+        else
+            null;
+
+        // Stop if no more pages
+        if (next_cursor == null) break;
+
+        // Update cursor for next iteration
+        // Free old cursor before allocating new one (escaping arena memory)
+        if (cursor) |old_cursor| allocator.free(old_cursor);
+        cursor = try allocator.dupe(u8, next_cursor.?);
+
+        page_num += 1;
+
+        // Reset arena for next iteration
+        _ = arena.reset(.retain_capacity);
+    }
+}
+
+// ============================================================================
 // Command Handlers
 // ============================================================================
 
@@ -506,6 +822,99 @@ fn handleHostGet(
     try writeOutput(response);
 }
 
+fn handleLogsSearch(
+    allocator: std.mem.Allocator,
+    root_matches: *const yazap.ArgMatches,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // Get global options
+    const domain_arg = root_matches.getSingleValue("domain");
+    const from_arg = root_matches.getSingleValue("from");
+    const to_arg = root_matches.getSingleValue("to");
+    var config = try initConfig(allocator, domain_arg, from_arg, to_arg);
+    defer config.deinit();
+
+    // Parse command options
+    const query = cmd_matches.getSingleValue("query") orelse "*";
+    const indexes_str = cmd_matches.getSingleValue("indexes") orelse "*";
+    const sort = cmd_matches.getSingleValue("sort") orelse "-timestamp";
+    const auto_paginate = cmd_matches.containsArg("auto-paginate");
+
+    // Parse page size (default DATADOG_DEFAULT_PAGE_SIZE, max DATADOG_MAX_PAGE_SIZE)
+    const page_size_str = cmd_matches.getSingleValue("page-size");
+    const page_size = if (page_size_str) |ps_str|
+        std.fmt.parseInt(usize, ps_str, 10) catch {
+            std.debug.print("Error: Invalid page-size value '{s}'. Must be a positive integer.\n", .{ps_str});
+            return error.InvalidPageSize;
+        }
+    else
+        DATADOG_DEFAULT_PAGE_SIZE;
+
+    if (page_size > DATADOG_MAX_PAGE_SIZE) {
+        std.debug.print("Error: page-size cannot exceed {d} (API limit)\n", .{DATADOG_MAX_PAGE_SIZE});
+        return error.PageSizeTooLarge;
+    }
+
+    // Parse limit
+    const limit_str = cmd_matches.getSingleValue("limit");
+    const limit: ?usize = if (limit_str) |l_str|
+        std.fmt.parseInt(usize, l_str, 10) catch {
+            std.debug.print("Error: Invalid limit value '{s}'. Must be a positive integer.\n", .{l_str});
+            return error.InvalidLimit;
+        }
+    else if (auto_paginate)
+        null // unlimited with auto-paginate
+    else
+        DATADOG_DEFAULT_PAGE_SIZE; // default for single page
+
+    // Parse indexes (comma-separated)
+    var indexes: std.ArrayList([]const u8) = .empty;
+    var index_iter = std.mem.splitScalar(u8, indexes_str, ',');
+    while (index_iter.next()) |index| {
+        const trimmed = std.mem.trim(u8, index, " \t");
+        if (trimmed.len > 0) {
+            try indexes.append(arena_alloc, trimmed);
+        }
+    }
+
+    // Build filter
+    const filter = LogsFilter{
+        .from = config.from_timestamp,
+        .to = config.to_timestamp,
+        .query = query,
+        .indexes = indexes.items,
+    };
+
+    // Build URL
+    const path = "/api/v2/logs/events/search";
+    const url = try buildRawUrl(arena_alloc, config.dd_domain, path, null);
+
+    // Build headers (need Content-Type for POST, Accept-Encoding to disable compression)
+    const base_count = 5; // DD-API-KEY, DD-APPLICATION-KEY, Accept, Content-Type, Accept-Encoding
+    var headers = try arena_alloc.alloc(std.http.Header, base_count);
+    headers[0] = .{ .name = "DD-API-KEY", .value = config.api_key };
+    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = config.app_key };
+    headers[2] = .{ .name = "Accept", .value = "application/json" };
+    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
+    headers[4] = .{ .name = "Accept-Encoding", .value = "identity" }; // Disable compression
+
+    // Stream logs with pagination
+    try streamLogsSearch(
+        allocator,
+        url,
+        headers,
+        filter,
+        page_size,
+        sort,
+        limit,
+        auto_paginate,
+    );
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -554,6 +963,20 @@ pub fn main() !void {
 
     try root.addSubcommand(host_cmd);
 
+    // Logs command with subcommands
+    var logs_cmd = app.createCommand("logs", "Query logs");
+
+    var logs_search_cmd = app.createCommand("search", "Search log events");
+    try logs_search_cmd.addArg(Arg.singleValueOption("query", 'q', "Search query (default: *)"));
+    try logs_search_cmd.addArg(Arg.singleValueOption("indexes", 'i', "Comma-separated indexes (default: *)"));
+    try logs_search_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max total logs (default: 1000 without --auto-paginate, unlimited with)"));
+    try logs_search_cmd.addArg(Arg.singleValueOption("page-size", null, "Logs per API request (default: 1000, max: 1000)"));
+    try logs_search_cmd.addArg(Arg.singleValueOption("sort", 's', "Sort order (default: -timestamp)"));
+    try logs_search_cmd.addArg(Arg.booleanOption("auto-paginate", null, "Fetch multiple pages automatically"));
+    try logs_cmd.addSubcommand(logs_search_cmd);
+
+    try root.addSubcommand(logs_cmd);
+
     // Parse arguments
     const matches = try app.parseProcess();
 
@@ -571,8 +994,15 @@ pub fn main() !void {
             std.debug.print("Error: Unknown host subcommand. Use 'host list' or 'host get'\n", .{});
             return error.UnknownSubcommand;
         }
+    } else if (matches.subcommandMatches("logs")) |*logs_matches| {
+        if (logs_matches.subcommandMatches("search")) |*search_matches| {
+            try handleLogsSearch(allocator, &matches, search_matches);
+        } else {
+            std.debug.print("Error: Use 'logs search' subcommand\n", .{});
+            return error.UnknownSubcommand;
+        }
     } else {
-        std.debug.print("Error: No subcommand specified. Use 'raw', 'validate', or 'host'\n", .{});
+        std.debug.print("Error: No subcommand specified. Use 'raw', 'validate', 'host', or 'logs'\n", .{});
         return error.NoSubcommand;
     }
 }
@@ -752,4 +1182,100 @@ test "buildQueryParams - no date range" {
     // Should only have filter
     try std.testing.expectEqual(@as(usize, 1), params.len);
     try std.testing.expectEqualStrings("filter", params[0].key);
+}
+
+test "buildLogsSearchBody - basic request" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const filter = LogsFilter{
+        .from = "2024-01-15T10:00:00Z",
+        .to = "2024-01-15T11:00:00Z",
+        .query = "*",
+        .indexes = &[_][]const u8{"*"},
+    };
+    const page = LogsPage{ .cursor = null, .limit = 1000 };
+
+    const body = try buildLogsSearchBody(arena.allocator(), filter, page, "-timestamp");
+
+    // Verify valid JSON structure
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.object.get("filter") != null);
+    try std.testing.expect(parsed.value.object.get("page") != null);
+    try std.testing.expectEqual(@as(i64, 1000), parsed.value.object.get("page").?.object.get("limit").?.integer);
+}
+
+test "buildLogsSearchBody - with cursor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const filter = LogsFilter{
+        .from = "2024-01-15T10:00:00Z",
+        .to = "2024-01-15T11:00:00Z",
+        .query = "status:error",
+        .indexes = &[_][]const u8{"main"},
+    };
+    const page = LogsPage{ .cursor = "eyJhZnRlciI6InRlc3QiLCJ2YWx1ZXMiOltdfQ==", .limit = 1000 };
+
+    const body = try buildLogsSearchBody(arena.allocator(), filter, page, "-timestamp");
+
+    // Verify cursor included
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    defer parsed.deinit();
+
+    const page_obj = parsed.value.object.get("page").?.object;
+    try std.testing.expect(page_obj.get("cursor") != null);
+    try std.testing.expectEqualStrings("eyJhZnRlciI6InRlc3QiLCJ2YWx1ZXMiOltdfQ==", page_obj.get("cursor").?.string);
+}
+
+test "buildLogsSearchBody - optional time range" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const filter = LogsFilter{
+        .from = null,
+        .to = null,
+        .query = "*",
+        .indexes = &[_][]const u8{"*"},
+    };
+    const page = LogsPage{ .cursor = null, .limit = 500 };
+
+    const body = try buildLogsSearchBody(arena.allocator(), filter, page, null);
+
+    // Verify structure (should not have from/to if not provided)
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.object.get("filter") != null);
+    const filter_obj = parsed.value.object.get("filter").?.object;
+    try std.testing.expect(filter_obj.get("from") == null);
+    try std.testing.expect(filter_obj.get("to") == null);
+}
+
+test "buildLogsSearchBody - multiple indexes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const filter = LogsFilter{
+        .from = null,
+        .to = null,
+        .query = "service:web",
+        .indexes = &[_][]const u8{ "main", "staging", "prod" },
+    };
+    const page = LogsPage{ .cursor = null, .limit = 100 };
+
+    const body = try buildLogsSearchBody(arena.allocator(), filter, page, "-timestamp");
+
+    // Verify indexes array
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    defer parsed.deinit();
+
+    const filter_obj = parsed.value.object.get("filter").?.object;
+    const indexes = filter_obj.get("indexes").?.array;
+    try std.testing.expectEqual(@as(usize, 3), indexes.items.len);
+    try std.testing.expectEqualStrings("main", indexes.items[0].string);
+    try std.testing.expectEqualStrings("staging", indexes.items[1].string);
+    try std.testing.expectEqualStrings("prod", indexes.items[2].string);
 }

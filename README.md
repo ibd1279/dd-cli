@@ -17,7 +17,9 @@ dd-cli --help
 
 ## Configuration
 
-Set environment variables for authentication:
+### API Key Authentication
+
+Set environment variables:
 
 ```bash
 export DD_API_KEY="your_api_key"
@@ -25,7 +27,45 @@ export DD_APPLICATION_KEY="your_application_key"
 export DD_SITE="datadoghq.com"  # Optional: datadoghq.eu, us3.datadoghq.com, etc.
 ```
 
+### OAuth2 Authentication
+
+dd-cli supports OAuth2 PKCE as an alternative to API keys. This is useful when distributing the tool to users who shouldn't need to manage API keys directly.
+
+```bash
+# Log in (opens browser for authorization)
+DD_CLIENT_ID=your_client_id dd-cli auth login
+
+# Or pass the client ID as a flag
+dd-cli auth login --client-id your_client_id
+
+# Log out (removes stored token)
+dd-cli auth logout
+```
+
+The token is stored at `~/.config/dd-cli/token.json` (mode 0600) and refreshed automatically when expired.
+
+**Authentication priority:** `DD_ACCESS_TOKEN` env var → stored token file → `DD_API_KEY` + `DD_APPLICATION_KEY`
+
+> **Note:** Datadog's OAuth2 is primarily designed for marketplace integrations. For personal use, API keys are simpler. See [Datadog OAuth Apps](https://docs.datadoghq.com/account_management/org_settings/oauth_apps/) for how to register an OAuth2 application and obtain a client ID.
+
 ## Commands
+
+### auth login / auth logout
+
+Authenticate with OAuth2 (PKCE flow):
+
+```bash
+# Log in — opens browser for authorization
+dd-cli auth login --client-id <your_client_id>
+# Or via environment variable:
+DD_CLIENT_ID=<your_client_id> dd-cli auth login
+
+# Log out — removes stored token
+dd-cli auth logout
+```
+
+**Options:**
+- `--client-id`: OAuth2 client ID (or set `DD_CLIENT_ID` env var)
 
 ### validate
 
@@ -36,71 +76,71 @@ dd-cli validate
 dd-cli --domain datadoghq.eu validate
 ```
 
-### host list
+### list hosts
 
 List hosts with optional filters:
 
 ```bash
 # All hosts
-dd-cli host list
+dd-cli list hosts
 
 # Filter by tags
-dd-cli host list "env:prod"
-dd-cli host list "env:prod,role:web"
+dd-cli list hosts "env:prod"
+dd-cli list hosts "env:prod,role:web"
 
 # With time range (ISO 8601)
-dd-cli --from "2024-01-15T00:00:00Z" --to "2024-01-15T23:59:59Z" host list
+dd-cli --from "2024-01-15T00:00:00Z" --to "2024-01-15T23:59:59Z" list hosts
 ```
 
-### host get
+### get host
 
 Get specific host details:
 
 ```bash
-dd-cli host get "i-abc123"
-dd-cli host get "server.example.com"
+dd-cli get host "i-abc123"
+dd-cli get host "server.example.com"
 ```
 
-### logs search
+### list logs
 
 Search and retrieve log events with optional pagination:
 
 ```bash
 # Basic search - returns first page (up to 1000 logs by default)
-dd-cli logs search --query "service:web"
+dd-cli list logs "service:web"
 
 # Search with time range
 dd-cli --from "2024-01-15T10:00:00Z" --to "2024-01-15T11:00:00Z" \
-  logs search --query "status:error"
+  list logs "status:error"
 
 # Single page with explicit limit
-dd-cli logs search --query "*" --limit 100
+dd-cli list logs "*" --limit 100
 
 # Multiple pages up to 5000 total logs
-dd-cli logs search --query "*" --auto-paginate --limit 5000
+dd-cli list logs "*" --auto-paginate --limit 5000
 
 # Get all logs matching query (use with caution!)
-dd-cli logs search --query "status:error" --auto-paginate
+dd-cli list logs "status:error" --auto-paginate
 
 # Search specific indexes
-dd-cli logs search --query "*" --indexes "main,staging"
+dd-cli list logs "*" --indexes "main,staging"
 
 # Sort order (default: -timestamp for newest first)
-dd-cli logs search --query "*" --sort "timestamp"  # Oldest first
+dd-cli list logs "*" --sort "timestamp"  # Oldest first
 
 # Pipe to jq for filtering
-dd-cli logs search --query "@http.status_code:>=500" | jq -r '.attributes.message'
+dd-cli list logs "@http.status_code:>=500" | jq -r '.attributes.message'
 
 # Real-time log monitoring pattern
-dd-cli logs search --query "*" --auto-paginate | grep "ERROR"
+dd-cli list logs "*" --auto-paginate | grep "ERROR"
 
 # Extract specific fields
-dd-cli logs search --query "service:api" | \
+dd-cli list logs "service:api" | \
   jq -r '[.attributes.timestamp, .attributes.service, .attributes.message] | @tsv'
 ```
 
 **Options:**
-- `-q, --query`: Search query string (default: `*` for all logs)
+- `FILTER`: Search query string (positional, default: `*` for all logs)
 - `-i, --indexes`: Comma-separated index names (default: `*` for all indexes)
 - `-n, --limit`: Maximum total logs to return
   - Without `--auto-paginate`: defaults to 1000 (single page cap)
@@ -129,6 +169,662 @@ With `--auto-paginate`:
 - `@http.status_code:>=500` - filter by custom attributes
 - `env:prod AND status:error` - combine conditions
 - `*` - match all logs
+
+### aggregate logs
+
+Aggregate log analytics with multiple compute operations:
+
+```bash
+# Single compute (count all logs)
+dd-cli --from 1h aggregate logs --compute 'count:*'
+
+# Multiple computes in one request
+dd-cli --from 1h aggregate logs \
+  --compute 'count:*' \
+  --compute 'avg:@duration' \
+  --compute 'pc99:@response_time'
+
+# Named computes (for clarity in results)
+dd-cli --from 1h aggregate logs \
+  --compute total='count:*' \
+  --compute avg_dur='avg:@duration' \
+  --compute p99_dur='pc99:@duration'
+
+# With filter and group-by
+dd-cli --from 1h aggregate logs \
+  --compute 'count:*' \
+  --compute 'avg:@duration' \
+  --group-by service \
+  --group-by status \
+  'service:web'
+
+# With indexes
+dd-cli --from 1h aggregate logs \
+  --compute 'count:*' \
+  --indexes "main,staging" \
+  'status:error'
+```
+
+**Options:**
+- `-c, --compute`: Compute metric (repeatable). Format: `[name=]aggregation:field`
+  - Examples: `count:*`, `avg:@duration`, `total='count:*'`
+  - Aggregations: count, avg, sum, min, max, median, cardinality, pc75, pc90, pc95, pc98, pc99
+- `-g, --group-by`: Group by facet (repeatable)
+- `-i, --indexes`: Comma-separated indexes (default: `*`)
+- `--limit`: Max buckets per group-by (default: 10)
+- `FILTER`: Optional positional filter query (default: `*`)
+
+### aggregate metrics
+
+Aggregate metrics with MQL queries and formulas:
+
+```bash
+# Single query
+dd-cli --from 1h aggregate metrics \
+  -q 'avg:system.cpu.idle{*}'
+
+# Multiple queries with auto-numbered names
+dd-cli --from 1h aggregate metrics \
+  -q 'avg:system.cpu.idle{*}' \
+  -q 'avg:system.mem.used{*}'
+
+# Named queries
+dd-cli --from 1h aggregate metrics \
+  -q cpu='avg:system.cpu.idle{*}' \
+  -q mem='avg:system.mem.used{*}'
+
+# Single formula combining queries
+dd-cli --from 1h aggregate metrics \
+  -q cpu='avg:system.cpu.idle{*}' \
+  -q mem='avg:system.mem.used{*}' \
+  --formula 'cpu + mem'
+
+# Auto-numbered queries with formula
+dd-cli --from 1h aggregate metrics \
+  -q 'avg:system.cpu.idle{*}' \
+  -q 'avg:system.mem.used{*}' \
+  --formula 'query1 / query2'
+
+# Multiple formulas (returns multiple result series)
+dd-cli --from 1h aggregate metrics \
+  -q 'avg:system.cpu.idle{*}' \
+  -q 'avg:system.mem.used{*}' \
+  --formula 'query1 + query2' \
+  --formula 'query1 - query2' \
+  --formula 'query1 / query2'
+
+# Complex example with multiple queries and formulas
+dd-cli --from 1h aggregate metrics \
+  -q cpu_idle='avg:system.cpu.idle{*}' \
+  -q cpu_user='avg:system.cpu.user{*}' \
+  -q cpu_system='avg:system.cpu.system{*}' \
+  --formula 'cpu_idle + cpu_user + cpu_system' \
+  --formula '100 - cpu_idle'
+```
+
+**Options:**
+- `-q, --query`: Query with optional name (repeatable, max 20). Format: `[name=]query`
+  - Examples: `'avg:cpu{*}'`, `cpu='avg:cpu{*}'`
+  - Without name: auto-numbered as query1, query2, ...
+- `-f, --formula`: Formula combining queries (repeatable, max 10)
+  - Examples: `'query1 + query2'`, `'cpu / mem * 100'`
+  - If not specified: each query becomes its own formula
+  - Multiple formulas return multiple result series
+  - **Result order matches formula declaration order** (first formula → series[0], etc.)
+
+**Note:** Both aggregate commands require `--from` and `--to` flags or relative time ranges.
+
+**Time Range Examples:**
+```bash
+# Relative time (1 hour ago to now)
+dd-cli --from 1h aggregate logs --compute 'count:*'
+
+# ISO 8601 timestamps
+dd-cli --from "2024-01-15T10:00:00Z" --to "2024-01-15T11:00:00Z" \
+  aggregate metrics -q 'avg:system.cpu.idle{*}'
+
+# Last 24 hours
+dd-cli --from 1d aggregate logs --compute 'avg:@duration' --group-by service
+```
+
+### Time Range Formats
+
+dd-cli supports three time formats for `--from` and `--to`:
+
+1. **"now" keyword** - Current timestamp (case-insensitive)
+   ```bash
+   dd-cli --from 1h --to now list logs "*"
+   ```
+
+2. **Relative times** - Offset from current time
+   - Minutes: `15m`, `30min`
+   - Hours: `1h`, `2hours`
+   - Days: `1d`, `7days`
+   - Weeks: `1w`, `2weeks`
+   - Months: `1mo`, `3months`
+
+   ```bash
+   dd-cli --from 1d list logs "error"
+   ```
+
+3. **ISO 8601 absolute timestamps** - Exact time in UTC
+   ```bash
+   dd-cli --from "2024-01-15T10:00:00Z" --to "2024-01-15T11:00:00Z" list logs "*"
+   ```
+
+**Default behavior:**
+- `--from` defaults to 15 minutes ago if not specified
+- `--to` defaults to now if not specified
+
+## APM (Application Performance Monitoring)
+
+### list services
+
+List APM services in your environment:
+
+```bash
+# List all services from last hour
+dd-cli --from 1h list services
+
+# Filter by environment
+dd-cli --from 1h list services --env prod
+
+# Filter by service name pattern
+dd-cli --from 1h list services "web"
+
+# Specific time range
+dd-cli --from "2024-01-15T10:00:00Z" --to "2024-01-15T11:00:00Z" list services
+```
+
+**Options:**
+- `FILTER`: Optional service filter query (positional)
+- `--env`: Filter by environment (e.g., prod, staging, dev)
+
+**Output:** JSON response with array of service names and metadata.
+
+### list spans
+
+Search and retrieve trace spans with automatic pagination:
+
+```bash
+# List spans from last hour
+dd-cli --from 1h list spans
+
+# Filter by service
+dd-cli --from 1h list spans --service web
+
+# Filter by service and operation
+dd-cli --from 1h list spans --service web --operation http.request
+
+# Search with query filter
+dd-cli --from 1h list spans "error"
+dd-cli --from 1h list spans "@http.status_code:>=500"
+
+# Combine query with service filter
+dd-cli --from 1h list spans "error" --service api --operation db.query
+
+# Multiple pages up to 5000 spans
+dd-cli --from 1h list spans --auto-paginate --limit 5000
+
+# Extract specific fields with jq
+dd-cli --from 1h list spans --service web | \
+  jq -r '.attributes | [.service, .resource_name, .duration] | @tsv'
+
+# Find slowest operations
+dd-cli --from 1h list spans --service web --limit 1000 | \
+  jq -r '.attributes | [.duration, .resource_name] | @tsv' | \
+  sort -rn | head -20
+```
+
+**Options:**
+- `FILTER`: Span filter query (default: `*`)
+- `--service`: Filter by service name
+- `--operation`: Filter by operation name
+- `--resource`: Filter by resource name
+- `-n, --limit`: Max total spans (default: 1000 without `--auto-paginate`, unlimited with)
+- `--page-size`: Spans per API request (default: 1000, max: 1000)
+- `-s, --sort`: Sort order (default: `-timestamp`)
+- `--auto-paginate`: Fetch multiple pages automatically
+
+**Output Format:** Newline-delimited JSON (NDJSON) - one span per line.
+
+**Query Syntax:** Uses Datadog span search syntax:
+- `service:web` - filter by service
+- `operation:http.request` - filter by operation
+- `resource:GET /api/users` - filter by resource
+- `@http.status_code:>=500` - filter by span attributes
+- `error` - spans with errors
+- `*` - match all spans
+
+### aggregate spans
+
+Compute analytics on span data with multiple aggregations:
+
+```bash
+# Count spans by service
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --group-by service
+
+# Average duration by service and operation
+dd-cli --from 1h aggregate spans \
+  --compute 'avg:@duration' \
+  --group-by service \
+  --group-by operation
+
+# Multiple metrics with named computes
+dd-cli --from 1h aggregate spans \
+  --compute total='count:*' \
+  --compute avg_duration='avg:@duration' \
+  --compute p99_duration='pc99:@duration' \
+  --group-by service
+
+# Error rate by service
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --group-by service \
+  "error"
+
+# Filter by service
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --compute 'avg:@duration' \
+  --service web \
+  --group-by operation
+
+# Complex aggregation with multiple dimensions
+dd-cli --from 1h aggregate spans \
+  --compute total='count:*' \
+  --compute errors='count:*' \
+  --compute avg_dur='avg:@duration' \
+  --compute p95_dur='pc95:@duration' \
+  --compute p99_dur='pc99:@duration' \
+  --group-by service \
+  --group-by @http.status_code \
+  --limit 20
+```
+
+**Options:**
+- `-c, --compute`: Compute metric (repeatable, max 20). Format: `[name=]aggregation:field`
+  - Examples: `count:*`, `avg:@duration`, `pc99:@duration`
+  - Aggregations: count, avg, sum, min, max, pc50, pc75, pc90, pc95, pc98, pc99, cardinality
+  - Common span metrics: `@duration`, `@http.status_code`, `@error.message`
+- `-g, --group-by`: Group by facet (repeatable, max 20)
+  - Examples: `service`, `operation`, `resource_name`, `@http.status_code`
+- `--service`: Filter by service name
+- `--operation`: Filter by operation name
+- `--limit`: Max buckets per group-by (default: 10)
+- `FILTER`: Optional positional filter query (default: `*`)
+
+**Output:** JSON response with aggregated metrics grouped by specified facets.
+
+**Common Use Cases:**
+```bash
+# Service health dashboard
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --compute 'avg:@duration' \
+  --compute 'pc95:@duration' \
+  --group-by service
+
+# Error analysis
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --group-by service \
+  --group-by @error.message \
+  "error"
+
+# HTTP status code distribution
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --group-by @http.status_code \
+  --service web
+
+# Slowest operations
+dd-cli --from 1h aggregate spans \
+  --compute 'avg:@duration' \
+  --compute 'pc99:@duration' \
+  --group-by operation \
+  --service web \
+  --limit 20
+```
+
+## Infrastructure
+
+### list containers
+
+List containers with filtering and pagination:
+
+```bash
+# List all containers from last hour
+dd-cli --from 1h list containers
+
+# Filter by tags
+dd-cli --from 1h list containers --tags "env:prod,service:web"
+
+# Group by image name
+dd-cli --from 1h list containers --group-by image_name
+
+# Sort and limit results
+dd-cli --from 1h list containers --sort name --limit 50
+
+# Pagination with cursor
+dd-cli --from 1h list containers --limit 100 --cursor "next_page_token"
+
+# Extract container details with jq
+dd-cli --from 1h list containers --tags "env:prod" | \
+  jq -r '.data[] | "\(.attributes.name) - \(.attributes.image)"'
+```
+
+**Options:**
+- `-t, --tags`: Filter by tags (comma-separated, e.g., "env:prod,service:web")
+- `-g, --group-by`: Group by field (e.g., image_name, host)
+- `-s, --sort`: Sort order
+- `-n, --limit`: Max containers to return
+- `-c, --cursor`: Pagination cursor from previous response
+
+**Output:** JSON response with container data including names, images, tags, and resource usage.
+
+### list processes
+
+List running processes with search and filtering:
+
+```bash
+# List all processes
+dd-cli list processes
+
+# Search for specific process
+dd-cli list processes --search "postgres"
+
+# Filter by tags
+dd-cli list processes --tags "env:prod"
+
+# Search and filter combined
+dd-cli list processes --search "nginx" --tags "env:prod,role:web"
+
+# Limit results
+dd-cli list processes --limit 100
+
+# Pagination with cursor
+dd-cli list processes --limit 50 --cursor "next_page_token"
+
+# Extract process details with jq
+dd-cli list processes --search "python" | \
+  jq -r '.data[] | "\(.attributes.process_name) (PID: \(.attributes.pid))"'
+```
+
+**Options:**
+- `-s, --search`: Search process names (partial match)
+- `-t, --tags`: Filter by tags (comma-separated)
+- `-n, --limit`: Max processes to return
+- `-c, --cursor`: Pagination cursor from previous response
+
+**Output:** JSON response with process data including names, PIDs, command lines, and resource metrics.
+
+**Note:** The processes API does not support time filtering. The `--from` and `--to` flags are ignored for this command (a warning is displayed if provided).
+
+## Network Performance Monitoring
+
+### aggregate connections
+
+Aggregate network connection data:
+
+```bash
+# Aggregate all connections from last hour
+dd-cli --from 1h aggregate connections
+
+# Group by destination IP
+dd-cli --from 1h aggregate connections --group-by destination_ip
+
+# Filter by tags
+dd-cli --from 30m aggregate connections --tags "env:prod"
+
+# Group by multiple dimensions
+dd-cli --from 1h aggregate connections --tags "service:web" --group-by source_ip
+
+# Analyze connection patterns
+dd-cli --from 1h aggregate connections --group-by destination_port | \
+  jq '.data[] | select(.attributes.count > 1000)'
+```
+
+**Options:**
+- `-t, --tags`: Filter by tags
+- `-g, --group-by`: Group by field (e.g., destination_ip, source_ip, destination_port)
+
+**Output:** JSON response with aggregated connection metrics grouped by specified dimensions.
+
+**Common Use Cases:**
+```bash
+# Top destination IPs
+dd-cli --from 1h aggregate connections --group-by destination_ip
+
+# Analyze traffic by service
+dd-cli --from 1h aggregate connections --tags "env:prod" --group-by service
+
+# Connection patterns by port
+dd-cli --from 30m aggregate connections --group-by destination_port
+```
+
+### aggregate dns
+
+Aggregate DNS query data:
+
+```bash
+# Aggregate all DNS queries from last hour
+dd-cli --from 1h aggregate dns
+
+# Group by query name
+dd-cli --from 1h aggregate dns --group-by query_name
+
+# Filter by tags
+dd-cli --from 30m aggregate dns --tags "env:prod"
+
+# Analyze DNS performance
+dd-cli --from 1h aggregate dns --group-by query_type
+
+# Find most queried domains
+dd-cli --from 1h aggregate dns --group-by query_name | \
+  jq '.data[] | {name: .attributes.query_name, count: .attributes.count}' | \
+  jq -s 'sort_by(.count) | reverse | .[:10]'
+```
+
+**Options:**
+- `-t, --tags`: Filter by tags
+- `-g, --group-by`: Group by field (e.g., query_name, query_type, rcode)
+
+**Output:** JSON response with aggregated DNS metrics grouped by specified dimensions.
+
+**Common Use Cases:**
+```bash
+# Most queried domains
+dd-cli --from 1h aggregate dns --group-by query_name
+
+# DNS query types distribution
+dd-cli --from 1h aggregate dns --group-by query_type
+
+# Analyze DNS errors
+dd-cli --from 1h aggregate dns --group-by rcode
+
+# DNS performance by service
+dd-cli --from 30m aggregate dns --tags "service:api" --group-by query_name
+```
+
+## Events, Monitors, and Downtimes
+
+### list events
+
+Search and retrieve events with automatic pagination:
+
+```bash
+# List events from last hour
+dd-cli --from 1h list events
+
+# Search all events (wildcard)
+dd-cli --from 1h list events "*"
+
+# Filter by priority
+dd-cli --from 1h list events "priority:normal"
+
+# Filter by source and tags
+dd-cli --from 1h list events "source:my_apps tags:env:prod"
+
+# Filter by alert type
+dd-cli --from 1h list events "alert_type:error"
+
+# Events from specific host
+dd-cli --from 1h list events "host:web-server-01"
+
+# Events on specific date
+dd-cli --from 1d list events "2024-01-15"
+
+# Multiple pages with auto-pagination
+dd-cli --from 1d list events "priority:normal" --auto-paginate
+
+# Limit results
+dd-cli --from 1h list events "*" --limit 100
+
+# Extract event titles with jq
+dd-cli --from 1h list events "*" | jq -r '.attributes.title'
+
+# Filter by tags and get recent changes
+dd-cli --from 6h list events "tags:deployment" | \
+  jq -r '[.attributes.timestamp, .attributes.title] | @tsv'
+```
+
+**Options:**
+- `FILTER`: Event filter query (default: `*`)
+- `-n, --limit`: Max total events (default: 1000 without `--auto-paginate`, unlimited with)
+- `--page-size`: Events per API request (default: 1000, max: 1000)
+- `-s, --sort`: Sort order (default: `-timestamp`)
+- `--auto-paginate`: Fetch multiple pages automatically
+
+**Output Format:** Newline-delimited JSON (NDJSON) - one event per line.
+
+**Query Syntax:** Datadog event search syntax:
+- `*` - all events (default)
+- `priority:normal` or `priority:low` - filter by priority
+- `source:my_apps` - filter by source
+- `tags:env:prod` - filter by tags
+- `alert_type:error` - filter by alert type (error, warning, info, success)
+- `host:hostname` - events for specific host
+- Date filters like `2024-01-15` for events on a specific date
+
+### get event
+
+Retrieve a specific event by ID:
+
+```bash
+# Get event details
+dd-cli get event "abc123xyz"
+
+# Format with jq
+dd-cli get event "8507301089841695052" | jq '.data.attributes | {title, text, tags, timestamp}'
+```
+
+### list monitors
+
+List alerting monitors with optional filtering:
+
+```bash
+# List all monitors
+dd-cli list monitors
+
+# Filter monitors by name/query
+dd-cli list monitors "web"
+
+# Limit results
+dd-cli list monitors --limit 20
+
+# Filter and limit
+dd-cli list monitors "database" --limit 10
+
+# Extract monitor names and types
+dd-cli list monitors | jq -r '.[] | "\(.id): \(.name) (\(.type))"'
+
+# Find critical monitors
+dd-cli list monitors | jq -r '.[] | select(.overall_state == "Alert") | {id, name, state: .overall_state}'
+```
+
+**Options:**
+- `QUERY`: Optional monitor filter query (searches monitor names and tags)
+- `--limit`: Maximum number of monitors to return
+
+**Output:** JSON array of monitor objects with full configuration.
+
+### get monitor
+
+Retrieve a specific monitor by ID:
+
+```bash
+# Get monitor configuration
+dd-cli get monitor "12345678"
+
+# Extract monitor details
+dd-cli get monitor "12345678" | jq '{name, type, query, message, tags}'
+```
+
+### list downtimes
+
+List scheduled downtimes:
+
+```bash
+# List all downtimes
+dd-cli list downtimes
+
+# Show only currently active downtimes
+dd-cli list downtimes --active
+
+# Limit results
+dd-cli list downtimes --limit 50
+
+# Show active downtimes with details
+dd-cli list downtimes --active | \
+  jq -r '.[] | "\(.id): \(.message) (ends: \(.end | todate))"'
+
+# Find downtimes for specific scope
+dd-cli list downtimes | jq -r '.[] | select(.scope[] | contains("env:prod"))'
+```
+
+**Options:**
+- `--active`: Show only currently active downtimes
+- `--limit`: Maximum number of downtimes to return
+
+**Output:** JSON array of downtime objects with schedules and scopes.
+
+### get downtime
+
+Retrieve a specific downtime by ID:
+
+```bash
+# Get downtime details
+dd-cli get downtime "987654"
+
+# Show downtime scope and schedule
+dd-cli get downtime "987654" | jq '{id, scope, start: .start | todate, end: .end | todate, message}'
+```
+
+**Common Use Cases:**
+```bash
+# Monitor recent deployment events
+dd-cli --from 1h list events "source:deployment tags:env:prod" | \
+  jq -r '.attributes | [.timestamp, .title, .text] | @tsv'
+
+# Check for error events
+dd-cli --from 6h list events "alert_type:error" --auto-paginate | \
+  jq -r '.attributes.title' | sort | uniq -c | sort -rn
+
+# Find all alerting monitors
+dd-cli list monitors | jq -r '.[] | select(.overall_state == "Alert") | .name'
+
+# List active downtimes affecting production
+dd-cli list downtimes --active | \
+  jq -r '.[] | select(.scope[] | contains("env:prod")) | {id, message, scope}'
+
+# Event timeline for troubleshooting
+dd-cli --from 24h list events "*" --auto-paginate | \
+  jq -r '.attributes | [.timestamp, .alert_type, .title] | @tsv' | \
+  sort
+```
 
 ### raw
 
@@ -167,8 +863,9 @@ dd-cli raw --path /api/v1/validate \
 Available for all commands:
 
 - `--domain, -d`: Override Datadog site (datadoghq.eu, us3.datadoghq.com, etc.)
-- `--from`: Start time in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)
-- `--to`: End time in ISO 8601 format
+- `--from`: Start time ("now", relative like "1h", or ISO 8601 like "2024-01-15T10:00:00Z")
+- `--to`: End time (same formats as --from; defaults to "now" if not specified)
+- `--verbose, -v`: Print each request URL to stderr before executing
 
 **Domain priority:** `--domain` flag > `DD_SITE` env > `datadoghq.com`
 
@@ -179,24 +876,72 @@ Available for all commands:
 dd-cli validate
 
 # Production hosts from last 24 hours
-dd-cli --from $(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ) host list "env:prod"
+dd-cli --from $(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ) list hosts "env:prod"
 
 # Get host details
-dd-cli host get "web-server-01"
+dd-cli get host "web-server-01"
 
 # Custom API query with jq
-dd-cli host list "env:prod" | jq '.host_list[] | {name: .name, up: .up}'
+dd-cli list hosts "env:prod" | jq '.host_list[] | {name: .name, up: .up}'
 
 # Search logs from the last hour
 dd-cli --from $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ) \
-  logs search --query "service:web AND status:error"
+  list logs "service:web AND status:error"
 
 # Monitor logs in real-time with grep
-dd-cli logs search --query "service:api" --auto-paginate | grep -i "timeout"
+dd-cli list logs "service:api" --auto-paginate | grep -i "timeout"
 
 # Extract error messages from logs
-dd-cli logs search --query "status:error" --limit 100 | \
+dd-cli list logs "status:error" --limit 100 | \
   jq -r '.attributes.message' | sort | uniq -c | sort -rn
+
+# List APM services
+dd-cli --from 1h list services --env prod
+
+# Find slow spans
+dd-cli --from 1h list spans --service web --limit 1000 | \
+  jq -r '.attributes | select(.duration > 1000000000) | [.service, .operation, .duration] | @tsv'
+
+# Get error rate by service
+dd-cli --from 1h aggregate spans \
+  --compute 'count:*' \
+  --group-by service \
+  "error"
+
+# Analyze operation performance
+dd-cli --from 1h aggregate spans \
+  --compute 'avg:@duration' \
+  --compute 'pc95:@duration' \
+  --compute 'pc99:@duration' \
+  --group-by operation \
+  --service web
+
+# Check recent deployment events
+dd-cli --from 1h list events "source:deployment tags:env:prod"
+
+# Find alerting monitors
+dd-cli list monitors | jq -r '.[] | select(.overall_state == "Alert") | .name'
+
+# List active downtimes
+dd-cli list downtimes --active
+
+# Get specific event details
+dd-cli get event "8507301089841695052"
+
+# Get monitor configuration
+dd-cli get monitor "12345678"
+
+# List containers in production
+dd-cli --from 1h list containers --tags "env:prod"
+
+# Find processes by name
+dd-cli list processes --search "nginx"
+
+# Analyze network connections
+dd-cli --from 1h aggregate connections --group-by destination_ip
+
+# DNS query analysis
+dd-cli --from 1h aggregate dns --group-by query_name
 
 # Post metrics
 dd-cli raw --path /api/v1/series \
@@ -224,6 +969,27 @@ zig build test --summary all
 zig build run -- validate
 ```
 
+### Code organization
+
+```
+src/
+├── main.zig        # Entry point: CLI argument setup and subcommand dispatch
+├── common.zig      # Shared types, time parsing, URL building, HTTP client,
+│                   # JSON utilities, auth context, and streaming helpers
+├── auth.zig        # OAuth2 PKCE login/logout and token storage
+├── list.zig        # list verb: handlers for logs, spans, hosts, metrics,
+│                   # APIs, services, monitors, downtimes, containers, processes
+├── aggregate.zig   # aggregate verb: handlers for logs, metrics, spans,
+│                   # network connections, and DNS; compute and group-by helpers
+├── get.zig         # get verb: handlers for events, monitors, downtimes,
+│                   # hosts, metrics, and APIs
+├── validate.zig    # validate verb: credential check handler
+├── raw.zig         # raw verb: direct HTTP request handler
+└── api/
+    ├── datadog_v1.zig  # Datadog v1 API type definitions
+    └── datadog_v2.zig  # Datadog v2 API type definitions
+```
+
 ## Requirements
 
 - Zig 0.15.2 or later
@@ -234,6 +1000,14 @@ zig build run -- validate
 - [Hosts API](https://docs.datadoghq.com/api/latest/hosts/)
 - [Logs API](https://docs.datadoghq.com/api/latest/logs/)
 - [Log Search Syntax](https://docs.datadoghq.com/logs/explorer/search_syntax/)
+- [APM API](https://docs.datadoghq.com/api/latest/apm/)
+- [Spans API](https://docs.datadoghq.com/api/latest/spans/)
+- [Events API](https://docs.datadoghq.com/api/latest/events/)
+- [Monitors API](https://docs.datadoghq.com/api/latest/monitors/)
+- [Downtimes API](https://docs.datadoghq.com/api/latest/downtimes/)
+- [Containers API](https://docs.datadoghq.com/api/latest/containers/)
+- [Processes API](https://docs.datadoghq.com/api/latest/processes/)
+- [Network Performance Monitoring API](https://docs.datadoghq.com/api/latest/network-device-monitoring/)
 - [Authentication](https://docs.datadoghq.com/api/latest/authentication/)
 
 ## License

@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FORGEJO_TOKEN }}
+
+      - name: Run tests
+        run: zig build test
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - aarch64-macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FORGEJO_TOKEN }}
+
+      - name: Build
+        run: |
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+          cp zig-out/bin/dd-cli dd-cli-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: dd-cli-${{ matrix.target }}
+          path: dd-cli-${{ matrix.target }}
+          retention-days: 7
+
+  publish:
+    name: Publish to package registry
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dist
+
+      - name: Upload to Forgejo package registry
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          BASE="${{ github.server_url }}/api/packages/${{ github.repository_owner }}/generic/dd-cli/${VERSION}"
+          for target in x86_64-linux aarch64-linux aarch64-macos; do
+            echo "Uploading dd-cli-${target}..."
+            curl --request DELETE \
+              --header "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+              "${BASE}/dd-cli-${target}" || true
+            curl --fail-with-body \
+              --request PUT \
+              --header "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+              --upload-file "dist/dd-cli-${target}/dd-cli-${target}" \
+              "${BASE}/dd-cli-${target}"
+            echo
+          done

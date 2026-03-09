@@ -36,6 +36,10 @@
             .url = "git+https://github.com/PrajwalCH/yazap/#a85c65beefe911db5fc17bc90e756738d742dc63",
             .hash = "yazap-0.6.3-Z1t-EmrzAQA-8vFR-JGpI7vCSpHv5_6z6PAIDq2X4PoH",
         },
+        .oauth2 = .{
+            .url = "https://github.com/ibd1279/oauth2/archive/refs/tags/v0.tar.gz",
+            .hash = "oauth2-0.0.0-lo2ivIE7DQAsv8SD8CJeT8odOqcPCsXUHOV4Dx2JW_EX",
+        },
     },
     .paths = .{
         "build.zig",

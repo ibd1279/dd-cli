@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) void {
 
     // Get yazap dependency
     const yazap = b.dependency("yazap", .{});
+    const oauth2 = b.dependency("oauth2", .{});
 
     const exe = b.addExecutable(.{
         .name = "dd-cli",
@@ -84,6 +85,7 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "dd_cli", .module = mod },
                 .{ .name = "yazap", .module = yazap.module("yazap") },
+                .{ .name = "oauth2", .module = oauth2.module("oauth2") },
             },
         }),
     });

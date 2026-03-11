@@ -19,6 +19,13 @@ pub fn getTokenFilePath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/.config/dd-cli/token.json", .{home});
 }
 
+/// Returns the path to the per-domain client credentials file:
+/// `{HOME}/.config/dd-cli/client_{domain}.json`. Caller must free.
+fn getClientCredentialsPath(allocator: std.mem.Allocator, domain: []const u8) ![]const u8 {
+    const home = std.posix.getenv("HOME") orelse return error.MissingHomeEnv;
+    return std.fmt.allocPrint(allocator, "{s}/.config/dd-cli/client_{s}.json", .{ home, domain });
+}
+
 // ============================================================================
 // Stored token format
 //
@@ -82,15 +89,115 @@ pub fn deleteToken(allocator: std.mem.Allocator) !void {
 }
 
 // ============================================================================
+// Client credentials persistence (DCR)
+//
+// {"client_id":"...","client_secret":"..."}
+//
+// `client_secret` is omitted when null (public clients).
+// ============================================================================
+
+/// Loaded client credentials returned by `loadClientCredentials`.
+/// The caller owns all string fields and must free them.
+const ClientCredentials = struct {
+    client_id: []u8,
+    client_secret: ?[]u8,
+};
+
+/// Persist DCR client credentials to `~/.config/dd-cli/client_{domain}.json`.
+/// Creates config dir if needed. Sets file permissions to 0o600.
+pub fn saveClientCredentials(
+    allocator: std.mem.Allocator,
+    domain: []const u8,
+    client_id: []const u8,
+    client_secret: ?[]const u8,
+) !void {
+    const config_dir = try getConfigDir(allocator);
+    defer allocator.free(config_dir);
+
+    const creds_path = try getClientCredentialsPath(allocator, domain);
+    defer allocator.free(creds_path);
+
+    try std.fs.cwd().makePath(config_dir);
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(allocator);
+
+    const writer = json_buf.writer(allocator);
+
+    if (client_secret) |cs| {
+        try writer.print(
+            "{{\"client_id\":\"{s}\",\"client_secret\":\"{s}\"}}",
+            .{ client_id, cs },
+        );
+    } else {
+        try writer.print("{{\"client_id\":\"{s}\"}}", .{client_id});
+    }
+
+    const file = try std.fs.cwd().createFile(creds_path, .{ .truncate = true });
+    defer file.close();
+
+    try file.writeAll(json_buf.items);
+    try file.chmod(0o600);
+}
+
+/// Load DCR client credentials from `~/.config/dd-cli/client_{domain}.json`.
+///
+/// Returns null if the file does not exist or the JSON is malformed.
+/// On success the caller owns all returned strings and must free them.
+pub fn loadClientCredentials(
+    allocator: std.mem.Allocator,
+    domain: []const u8,
+) !?ClientCredentials {
+    const creds_path = try getClientCredentialsPath(allocator, domain);
+    defer allocator.free(creds_path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, creds_path, 65536) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return null;
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return null;
+
+    const client_id_val = root.object.get("client_id") orelse return null;
+    if (client_id_val != .string) return null;
+    const client_id = allocator.dupe(u8, client_id_val.string) catch return null;
+
+    const client_secret: ?[]u8 = if (root.object.get("client_secret")) |v|
+        if (v == .string) blk: {
+            const s = allocator.dupe(u8, v.string) catch {
+                allocator.free(client_id);
+                return null;
+            };
+            break :blk s;
+        } else null
+    else
+        null;
+
+    return .{ .client_id = client_id, .client_secret = client_secret };
+}
+
+// ============================================================================
 // Token loading and refresh
 // ============================================================================
 
-/// Build an oauth2.Config for Datadog using only `client_id` (PKCE public client).
+/// Build an oauth2.Config for Datadog.
+///
+/// When `client_secret` is null, uses `.none` auth (public PKCE client).
+/// When `client_secret` is non-null, sets `.client_secret_post` and stores
+/// the secret in `config.options.client_secret`. The caller must ensure the
+/// secret slice outlives the config.
+///
 /// `redirect_uri` is optional; pass null when not needed (e.g., token refresh).
 fn buildDatadogConfig(
     dd_domain: []const u8,
     client_id: []const u8,
     redirect_uri: ?[]const u8,
+    client_secret: ?[]const u8,
     allocator: std.mem.Allocator,
 ) !struct {
     config: oauth2.Config,
@@ -106,12 +213,12 @@ fn buildDatadogConfig(
 
     const token_url = try std.fmt.allocPrint(
         allocator,
-        "https://app.{s}/oauth2/v1/token",
+        "https://api.{s}/oauth2/v1/token",
         .{dd_domain},
     );
     errdefer allocator.free(token_url);
 
-    const config = oauth2.Config{
+    var config = oauth2.Config{
         .auth_url = auth_url,
         .token_url = token_url,
         .options = .{
@@ -121,22 +228,69 @@ fn buildDatadogConfig(
         .client_auth_method = .none,
     };
 
+    if (client_secret) |cs| {
+        config.options.client_secret = cs;
+        config.client_auth_method = .client_secret_post;
+    }
+
     return .{ .config = config, .auth_url = auth_url, .token_url = token_url };
 }
 
-/// Attempt to refresh a stored token.  Reads `DD_CLIENT_ID` from the
-/// environment, calls the Datadog token endpoint, persists the new token, and
-/// returns the new access token string (owned by caller).
+/// Register a new OAuth2 client via RFC 7591 Dynamic Client Registration.
+///
+/// Posts to `https://api.{domain}/api/v2/oauth2/register`. Caller owns the
+/// returned ClientRegistrationResponse and must call `response.deinit(allocator)`.
+fn registerNewClient(
+    allocator: std.mem.Allocator,
+    http_client: *std.http.Client,
+    domain: []const u8,
+    redirect_uri: []const u8,
+) !oauth2.ClientRegistrationResponse {
+    const reg_url = try std.fmt.allocPrint(
+        allocator,
+        "https://api.{s}/api/v2/oauth2/register",
+        .{domain},
+    );
+    defer allocator.free(reg_url);
+
+    const request = oauth2.ClientRegistrationRequest{
+        .client_name = "dd-cli",
+        .redirect_uris = &.{redirect_uri},
+        .grant_types = &.{ "authorization_code", "refresh_token" },
+    };
+
+    return oauth2.registerClient(allocator, http_client, reg_url, request, false);
+}
+
+/// Attempt to refresh a stored token.
+///
+/// Resolves client credentials by checking the stored DCR file first, then
+/// falling back to the `DD_CLIENT_ID` environment variable (with no secret).
+/// Calls the Datadog token endpoint, persists the new token, and returns the
+/// new access token string (owned by caller).
 fn refreshStoredToken(
     allocator: std.mem.Allocator,
     dd_domain: []const u8,
     stored_refresh_token: []const u8,
 ) ![]const u8 {
-    const client_id = std.posix.getenv("DD_CLIENT_ID") orelse {
-        return error.MissingClientId;
+    // Prefer stored DCR credentials; fall back to env var.
+    var loaded_creds: ?ClientCredentials = null;
+    defer if (loaded_creds) |creds| {
+        allocator.free(creds.client_id);
+        if (creds.client_secret) |cs| allocator.free(cs);
     };
 
-    const built = try buildDatadogConfig(dd_domain, client_id, null, allocator);
+    const client_id: []const u8 = blk: {
+        if (try loadClientCredentials(allocator, dd_domain)) |creds| {
+            loaded_creds = creds;
+            break :blk creds.client_id;
+        }
+        break :blk std.posix.getenv("DD_CLIENT_ID") orelse return error.MissingClientId;
+    };
+
+    const client_secret: ?[]const u8 = if (loaded_creds) |creds| creds.client_secret else null;
+
+    const built = try buildDatadogConfig(dd_domain, client_id, null, client_secret, allocator);
     defer allocator.free(built.auth_url);
     defer allocator.free(built.token_url);
 
@@ -230,31 +384,81 @@ const dd_scopes = &[_][]const u8{
 
 /// Perform an interactive OAuth2 PKCE login against Datadog.
 ///
-/// Resolves `client_id` from `client_id_arg` first, then the `DD_CLIENT_ID`
-/// environment variable.  Prints the authorization URL, attempts to open the
-/// system browser, waits for the local callback, exchanges the code, and saves
-/// the resulting token.
+/// Client ID resolution order:
+///  1. `--client-id` argument (skips DCR)
+///  2. Stored DCR credentials file (`~/.config/dd-cli/client_{domain}.json`)
+///  3. Dynamic Client Registration against `https://app.{domain}/oauth2/v1/register`
+///
+/// After resolving credentials, performs the PKCE authorization code flow,
+/// exchanges the code for a token, and saves it.
 pub fn handleLoginCommand(
     allocator: std.mem.Allocator,
     dd_domain: []const u8,
     client_id_arg: ?[]const u8,
 ) !void {
-    // Resolve client_id.
-    const client_id: []const u8 = client_id_arg orelse
-        std.posix.getenv("DD_CLIENT_ID") orelse {
-        std.debug.print(
-            "Error: client_id is required. Pass --client-id or set the DD_CLIENT_ID environment variable.\n",
-            .{},
-        );
-        return error.MissingClientId;
-    };
-
-    // Start local callback server.
+    // Start local callback server first so we have the redirect_uri for DCR.
     var callback_server = try oauth2.CallbackServer.init(allocator);
     defer callback_server.deinit();
 
     const redirect_uri = try callback_server.getRedirectUri(allocator);
     defer allocator.free(redirect_uri);
+
+    // Resolve client_id and client_secret.
+    //
+    // When DCR is used, these slices are owned by us and must be freed after
+    // buildDatadogConfig returns (the config only borrows the slices).
+    var dcr_client_id: ?[]u8 = null;
+    var dcr_client_secret: ?[]u8 = null;
+    defer if (dcr_client_id) |id| allocator.free(id);
+    defer if (dcr_client_secret) |cs| allocator.free(cs);
+
+    const client_id: []const u8 = blk: {
+        if (client_id_arg) |id| {
+            // Explicit override — skip DCR entirely.
+            break :blk id;
+        }
+
+        // Try stored DCR credentials.
+        if (try loadClientCredentials(allocator, dd_domain)) |creds| {
+            dcr_client_id = creds.client_id;
+            dcr_client_secret = creds.client_secret;
+            break :blk creds.client_id;
+        }
+
+        // No stored credentials — register a new client.
+        std.debug.print("Registering new OAuth2 client...\n", .{});
+
+        var reg_http_client = std.http.Client{ .allocator = allocator };
+        defer reg_http_client.deinit();
+
+        const response = try registerNewClient(allocator, &reg_http_client, dd_domain, redirect_uri);
+        // Deinit is handled below after we've extracted and duped what we need.
+
+        // Dupe the fields we need before freeing the response. response.client_id
+        // and response.client_secret are owned by the response struct.
+        const new_id = try allocator.dupe(u8, response.client_id);
+        errdefer allocator.free(new_id);
+
+        const new_secret: ?[]u8 = if (response.client_secret) |cs|
+            try allocator.dupe(u8, cs)
+        else
+            null;
+        errdefer if (new_secret) |cs| allocator.free(cs);
+
+        response.deinit(allocator);
+
+        try saveClientCredentials(allocator, dd_domain, new_id, new_secret);
+        std.debug.print("Client registered and saved.\n", .{});
+
+        dcr_client_id = new_id;
+        dcr_client_secret = new_secret;
+        break :blk new_id;
+    };
+
+    const client_secret: ?[]const u8 = if (client_id_arg != null)
+        null // explicit --client-id override is always a public client
+    else
+        dcr_client_secret;
 
     // Generate PKCE material.
     const verifier = try oauth2.generateVerifier(allocator);
@@ -267,7 +471,7 @@ pub fn handleLoginCommand(
     defer allocator.free(state);
 
     // Build the Datadog oauth2.Config (we own auth_url and token_url).
-    const built = try buildDatadogConfig(dd_domain, client_id, redirect_uri, allocator);
+    const built = try buildDatadogConfig(dd_domain, client_id, redirect_uri, client_secret, allocator);
     defer allocator.free(built.auth_url);
     defer allocator.free(built.token_url);
 

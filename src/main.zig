@@ -244,7 +244,7 @@ pub fn main() !void {
     // auth command - OAuth2 login/logout
     var auth_cmd = app.createCommand("auth", "Manage OAuth2 authentication");
     var auth_login_cmd = app.createCommand("login", "Log in with OAuth2 (PKCE flow)");
-    try auth_login_cmd.addArg(Arg.singleValueOption("client-id", null, "OAuth2 client ID (or set DD_CLIENT_ID env var)"));
+    try auth_login_cmd.addArg(Arg.singleValueOption("client-id", null, "OAuth2 client ID override (auto-registered via DCR if omitted)"));
     try auth_cmd.addSubcommand(auth_login_cmd);
     const auth_logout_cmd = app.createCommand("logout", "Remove stored OAuth2 token");
     try auth_cmd.addSubcommand(auth_logout_cmd);

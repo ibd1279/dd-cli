@@ -38,7 +38,7 @@
         },
         .oauth2 = .{
             .url = "https://github.com/ibd1279/oauth2/archive/refs/tags/v0.tar.gz",
-            .hash = "oauth2-0.0.0-lo2ivIE7DQAsv8SD8CJeT8odOqcPCsXUHOV4Dx2JW_EX",
+            .hash = "oauth2-0.0.0-lo2ivLx7DQBd_uFCK2QRdu8itRwMKUCzDyUNMl_1uKz8",
         },
     },
     .paths = .{

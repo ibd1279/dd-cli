@@ -826,6 +826,416 @@ dd-cli --from 24h list events "*" --auto-paginate | \
   sort
 ```
 
+## Incident Management and Cases
+
+### list incidents
+
+List incidents with optional state filtering:
+
+```bash
+# All incidents
+dd-cli list incidents
+
+# Active incidents only
+dd-cli list incidents --state active
+
+# With time range
+dd-cli --from 1d list incidents --state active
+
+# Extract titles
+dd-cli list incidents | jq -r '.data[] | "\(.id): \(.attributes.title)"'
+```
+
+**Options:**
+- `--state`: Filter by state (active, stable, resolved)
+- `--limit`: Max incidents to return
+
+### get incident
+
+Retrieve a specific incident by ID:
+
+```bash
+dd-cli get incident "abc-123"
+dd-cli get incident "abc-123" | jq '.data.attributes | {title, status, created}'
+```
+
+### list cases
+
+List cases in the Case Management system:
+
+```bash
+# All open cases
+dd-cli list cases --state open
+
+# High-priority open cases
+dd-cli list cases --state open --priority P1
+
+# Search by keyword
+dd-cli list cases "database" --limit 20
+
+# Extract case summaries
+dd-cli list cases | jq -r '.data[] | "\(.id): [\(.attributes.priority)] \(.attributes.title)"'
+```
+
+**Options:**
+- `QUERY`: Optional keyword search (positional)
+- `--state`: Filter by state
+- `--priority`: Filter by priority (P1, P2, P3, P4, P5)
+- `--limit`: Max cases to return
+
+### get case
+
+Retrieve a specific case by ID:
+
+```bash
+dd-cli get case "12345"
+dd-cli get case "12345" | jq '.data.attributes | {title, state, priority}'
+```
+
+## Dashboards and Notebooks
+
+### list dashboards
+
+List dashboards with optional name filtering:
+
+```bash
+# All dashboards
+dd-cli list dashboards
+
+# Filter by name
+dd-cli list dashboards "production"
+
+# Extract IDs and titles
+dd-cli list dashboards | jq -r '.dashboards[] | "\(.id): \(.title)"'
+```
+
+**Options:**
+- `FILTER`: Optional name filter (positional)
+- `--limit`: Max dashboards to return
+
+### get dashboard
+
+Retrieve a specific dashboard by ID:
+
+```bash
+dd-cli get dashboard "abc-123-def"
+dd-cli get dashboard "abc-123-def" | jq '{title, widgets: (.widgets | length)}'
+```
+
+### list notebooks
+
+List notebooks with optional text search:
+
+```bash
+# All notebooks
+dd-cli list notebooks
+
+# Search by name
+dd-cli list notebooks "runbook"
+
+# Extract names
+dd-cli list notebooks | jq -r '.data[] | "\(.id): \(.attributes.name)"'
+```
+
+**Options:**
+- `FILTER`: Optional text search (positional)
+- `--limit`: Max notebooks to return
+
+### get notebook
+
+Retrieve a specific notebook by ID:
+
+```bash
+dd-cli get notebook "12345"
+```
+
+## Synthetics
+
+### list synthetics
+
+List Synthetic tests:
+
+```bash
+# All tests
+dd-cli list synthetics
+
+# Filter by name
+dd-cli list synthetics "checkout"
+
+# Show test IDs and status
+dd-cli list synthetics | jq -r '.tests[] | "\(.public_id): \(.name) (\(.status))"'
+```
+
+**Options:**
+- `FILTER`: Optional text filter (positional)
+- `--limit`: Max tests to return
+
+### get synthetic
+
+Retrieve a specific Synthetic test by public ID:
+
+```bash
+dd-cli get synthetic "abc-def-ghi"
+dd-cli get synthetic "abc-def-ghi" | jq '{name, type, status}'
+```
+
+## Real User Monitoring
+
+### list rum
+
+Search and retrieve RUM events with automatic pagination:
+
+```bash
+# All RUM events from last hour
+dd-cli --from 1h list rum
+
+# Filter by service
+dd-cli --from 1h list rum --service web
+
+# Search with query
+dd-cli --from 1h list rum "session.type:user"
+
+# Filter by service and query
+dd-cli --from 1h list rum "action.type:click" --service checkout
+
+# Auto-paginate to get more events
+dd-cli --from 1h list rum --auto-paginate --limit 5000
+
+# Extract session IDs
+dd-cli --from 1h list rum | jq -r '.attributes.session.id // empty'
+```
+
+**Options:**
+- `FILTER`: RUM search query (default: `*`)
+- `--service`: Filter by service name
+- `-n, --limit`: Max events (default: 1000 without `--auto-paginate`, unlimited with)
+- `--page-size`: Events per API request (default: 1000, max: 1000)
+- `-s, --sort`: Sort order (default: `-timestamp`)
+- `--auto-paginate`: Fetch multiple pages automatically
+
+**Output Format:** Newline-delimited JSON (NDJSON) — one event per line.
+
+**Note:** Requires RUM to be configured for your application.
+
+## Security Monitoring
+
+### list signals
+
+Search security monitoring signals:
+
+```bash
+# All signals from last hour
+dd-cli --from 1h list signals
+
+# Filter by rule
+dd-cli --from 1h list signals "rule:brute_force"
+
+# High severity signals
+dd-cli --from 1h list signals "severity:high"
+
+# Extract signal summaries
+dd-cli --from 1h list signals | jq -r '.data[] | "\(.id): [\(.attributes.severity)] \(.attributes.message)"'
+```
+
+**Options:**
+- `FILTER`: Signal search query (default: `*`)
+- `--limit`: Max signals to return (default: 1000)
+
+### get signal
+
+Retrieve a specific security signal by ID:
+
+```bash
+dd-cli get signal "AQAAAYmLbW5zFHh4BAAAAAABAA..."
+dd-cli get signal "<ID>" | jq '.data.attributes | {message, status, severity}'
+```
+
+### list findings
+
+List Security Posture Management findings:
+
+```bash
+# All findings
+dd-cli list findings
+
+# Filter by tag
+dd-cli list findings "env:prod"
+
+# Extract finding details
+dd-cli list findings | jq -r '.data[] | "\(.id): \(.attributes.rule.name)"'
+```
+
+**Options:**
+- `FILTER`: Tag filter (positional)
+- `--limit`: Max findings to return
+
+**Note:** Requires Cloud Security Posture Management (CSPM) to be enabled.
+
+### get finding
+
+Retrieve a specific finding by ID:
+
+```bash
+dd-cli get finding "<FINDING_ID>"
+dd-cli get finding "<FINDING_ID>" | jq '.data.attributes | {rule, status, resource_type}'
+```
+
+## Error Tracking
+
+### list errors
+
+List Error Tracking issues:
+
+```bash
+# All issues
+dd-cli list errors
+
+# Filter by service
+dd-cli list errors --service api
+
+# Search by message text
+dd-cli list errors "NullPointerException"
+
+# Filter service + search
+dd-cli list errors "timeout" --service checkout
+
+# Extract error summaries
+dd-cli list errors | jq -r '.data[] | "\(.id): \(.attributes.message)"'
+```
+
+**Options:**
+- `FILTER`: Search query (positional)
+- `--service`: Filter by service name
+- `--limit`: Max issues to return
+
+**Note:** Requires Error Tracking to be configured.
+
+### get error
+
+Retrieve a specific Error Tracking issue by ID:
+
+```bash
+dd-cli get error "<ISSUE_ID>"
+dd-cli get error "<ISSUE_ID>" | jq '.data.attributes | {message, service, status}'
+```
+
+## CI Visibility
+
+### list pipelines
+
+List CI pipeline events:
+
+```bash
+# Pipeline events from last day
+dd-cli --from 1d list pipelines
+
+# Filter by pipeline name
+dd-cli --from 1d list pipelines --service my-pipeline
+
+# Search by text
+dd-cli --from 1d list pipelines "deploy"
+
+# Extract pipeline results
+dd-cli --from 1d list pipelines | jq -r '.data[] | "\(.attributes.pipeline_name): \(.attributes.status)"'
+```
+
+**Options:**
+- `FILTER`: Search query (positional)
+- `--service`: Filter by pipeline/service name
+- `--limit`: Max events to return
+
+**Note:** Requires CI Visibility to be configured.
+
+### get pipeline-event
+
+Retrieve a specific pipeline event by ID:
+
+```bash
+dd-cli get pipeline-event "<EVENT_ID>"
+```
+
+### list tests
+
+List CI test events:
+
+```bash
+# Test events from last day
+dd-cli --from 1d list tests
+
+# Filter by test suite/service
+dd-cli --from 1d list tests --service my-suite
+
+# Find failing tests
+dd-cli --from 1d list tests "status:fail"
+
+# Extract test results
+dd-cli --from 1d list tests | jq -r '.data[] | "\(.attributes.test_name): \(.attributes.status)"'
+```
+
+**Options:**
+- `FILTER`: Search query (positional)
+- `--service`: Filter by test service/suite
+- `--limit`: Max events to return
+
+### get test-event
+
+Retrieve a specific test event by ID:
+
+```bash
+dd-cli get test-event "<EVENT_ID>"
+```
+
+## Network Device Monitoring
+
+### list devices
+
+List monitored network devices:
+
+```bash
+# All devices
+dd-cli list devices
+
+# Search by name or type
+dd-cli list devices "router"
+
+# Extract device details
+dd-cli list devices | jq -r '.data[] | "\(.id): \(.attributes.name) (\(.attributes.ip_address))"'
+```
+
+**Options:**
+- `FILTER`: Query string (positional)
+- `--limit`: Max devices to return
+
+### get device
+
+Retrieve a specific network device by ID:
+
+```bash
+dd-cli get device "<DEVICE_ID>"
+dd-cli get device "<DEVICE_ID>" | jq '.data.attributes | {name, ip_address, tags}'
+```
+
+## Service Catalog
+
+### list dependencies
+
+List service catalog relations (dependencies between services):
+
+```bash
+# All relations
+dd-cli list dependencies
+
+# Dependencies of a specific service
+dd-cli list dependencies "checkout-service"
+
+# Extract upstream/downstream services
+dd-cli list dependencies "api-gateway" | jq -r '.data[] | "\(.attributes.from) → \(.attributes.to) (\(.attributes.type))"'
+```
+
+**Options:**
+- `SERVICE`: Source service to filter by (positional)
+- `--limit`: Max relations to return
+
 ### raw
 
 Direct API access with full control:
@@ -977,12 +1387,15 @@ src/
 ├── common.zig      # Shared types, time parsing, URL building, HTTP client,
 │                   # JSON utilities, auth context, and streaming helpers
 ├── auth.zig        # OAuth2 PKCE login/logout and token storage
-├── list.zig        # list verb: handlers for logs, spans, hosts, metrics,
-│                   # APIs, services, monitors, downtimes, containers, processes
-├── aggregate.zig   # aggregate verb: handlers for logs, metrics, spans,
-│                   # network connections, and DNS; compute and group-by helpers
-├── get.zig         # get verb: handlers for events, monitors, downtimes,
-│                   # hosts, metrics, and APIs
+├── list.zig        # list verb: logs, spans, hosts, metrics, APIs, services,
+│                   # monitors, downtimes, containers, processes, rum, incidents,
+│                   # cases, dashboards, notebooks, synthetics, devices,
+│                   # signals, findings, errors, pipelines, tests, dependencies
+├── aggregate.zig   # aggregate verb: logs, metrics, spans, connections, DNS
+├── get.zig         # get verb: events, monitors, downtimes, hosts, metrics,
+│                   # APIs, incidents, notebooks, errors, devices, cases,
+│                   # dashboards, synthetics, signals, findings,
+│                   # pipeline-event, test-event
 ├── validate.zig    # validate verb: credential check handler
 ├── raw.zig         # raw verb: direct HTTP request handler
 └── api/

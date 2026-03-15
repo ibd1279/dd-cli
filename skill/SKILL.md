@@ -40,6 +40,22 @@ dd-cli --from 1h list containers --tags "env:prod,service:web"
 dd-cli list processes --search "postgres"
 dd-cli --from 1h aggregate connections --group-by destination_ip
 dd-cli --from 1h aggregate dns --group-by query_name
+dd-cli list incidents --state active
+dd-cli list cases --state open --priority P1
+dd-cli list dashboards "production"
+dd-cli list notebooks "runbook"
+dd-cli list synthetics "checkout"
+dd-cli --from 1h list rum --service web
+dd-cli --from 1h list signals "rule:brute_force"
+dd-cli list findings "env:prod"
+dd-cli list errors --service api
+dd-cli --from 1d list pipelines --service my-pipeline
+dd-cli --from 1d list tests --service my-suite
+dd-cli list devices
+dd-cli list dependencies "checkout-service"
+dd-cli get dashboard <DASHBOARD_ID>
+dd-cli get incident <INCIDENT_ID>
+dd-cli get signal <SIGNAL_ID>
 ```
 
 **Quoting rules:**
@@ -61,13 +77,26 @@ dd-cli --from 1h aggregate dns --group-by query_name
 - `apis` - API catalog and OpenAPI specifications
 - `services` - APM services (Application Performance Monitoring)
 - `spans` - Trace spans and APM analytics
+- `rum` - Real User Monitoring events
 - `events` - Events and change tracking
 - `monitors` - Alerting monitors
 - `downtimes` - Scheduled downtimes
+- `incidents` - Incident Management
+- `cases` - Case Management
+- `dashboards` - Dashboards
+- `notebooks` - Notebooks
+- `synthetics` - Synthetic tests
 - `containers` - Container infrastructure
 - `processes` - Running processes
+- `devices` - Network Device Monitoring (NDM)
 - `connections` - Network connections (aggregate only)
 - `dns` - DNS queries (aggregate only)
+- `signals` - Security Monitoring signals
+- `findings` - Security Posture Management findings
+- `errors` - Error Tracking issues
+- `pipelines` - CI pipeline events
+- `tests` - CI test events
+- `dependencies` - Service catalog relations (list only)
 
 ## Analysis Approach
 
@@ -90,8 +119,21 @@ dd-cli --from 1h aggregate dns --group-by query_name
 | list | events | --from (default: 15m) | --to, --limit, --sort, --auto-paginate, --page-size | Optional |
 | list | monitors | None | --limit | Optional |
 | list | downtimes | None | --active, --limit | N/A |
+| list | incidents | None | --from, --to, --state, --limit | N/A |
+| list | cases | None | --state, --priority, --limit | Optional (search) |
+| list | dashboards | None | --limit | Optional (name filter) |
+| list | notebooks | None | --limit | Optional (text search) |
+| list | synthetics | None | --limit | Optional (text filter) |
 | list | containers | --from (default: 15m) | --to, --tags, --group-by, --sort, --limit, --cursor | N/A |
 | list | processes | None | --search, --tags, --limit, --cursor | N/A |
+| list | devices | None | --limit | Optional (query) |
+| list | rum | --from (default: 15m) | --to, --service, --sort, --limit, --auto-paginate, --page-size | Optional |
+| list | signals | --from (default: 15m) | --to, --limit | Optional |
+| list | findings | None | --limit | Optional (tag filter) |
+| list | errors | None | --from, --to, --service, --limit | Optional |
+| list | pipelines | --from (default: 15m) | --to, --service, --limit | Optional |
+| list | tests | --from (default: 15m) | --to, --service, --limit | Optional |
+| list | dependencies | None | --limit | Optional (SERVICE positional) |
 | aggregate | logs | --from (default: 15m), --compute (repeatable) | --to, --group-by, --limit, --indexes | Optional |
 | aggregate | connections | --from (default: 15m) | --to, --tags, --group-by | N/A |
 | aggregate | dns | --from (default: 15m) | --to, --tags, --group-by | N/A |
@@ -103,6 +145,17 @@ dd-cli --from 1h aggregate dns --group-by query_name
 | get | monitor | None | None | Required (ID) |
 | get | downtime | None | None | Required (ID) |
 | get | host | None | None | Required (name) |
+| get | incident | None | None | Required (INCIDENT_ID) |
+| get | notebook | None | None | Required (NOTEBOOK_ID) |
+| get | error | None | None | Required (ISSUE_ID) |
+| get | device | None | None | Required (DEVICE_ID) |
+| get | case | None | None | Required (CASE_ID) |
+| get | dashboard | None | None | Required (DASHBOARD_ID) |
+| get | synthetic | None | None | Required (PUBLIC_ID) |
+| get | signal | None | None | Required (SIGNAL_ID) |
+| get | finding | None | None | Required (FINDING_ID) |
+| get | pipeline-event | None | None | Required (EVENT_ID) |
+| get | test-event | None | None | Required (EVENT_ID) |
 | get | log | N/A (unsupported) | N/A | N/A |
 | validate | N/A | None | None | N/A |
 
@@ -179,6 +232,49 @@ dd-cli --from 1h aggregate dns --group-by query_name
 - `-t, --tags <csv>` - Filter by tags (comma-separated)
 - `-n, --limit <n>` - Max processes to return
 - `-c, --cursor <token>` - Pagination cursor
+
+**list incidents:**
+- `--state <state>` - Filter by state (e.g., active, stable, resolved)
+- `--limit <n>` - Max incidents to return
+
+**list cases:**
+- `--state <state>` - Filter by state
+- `--priority <priority>` - Filter by priority
+- `--limit <n>` - Max cases to return
+
+**list dashboards / list notebooks / list synthetics:**
+- `--limit <n>` - Max results to return
+- Positional FILTER: name/text search string
+
+**list rum:**
+- `--service <name>` - Filter by service name
+- `--limit <n>` - Max results (default: 1000 without `--auto-paginate`, unlimited with)
+- `--page-size <n>` - Events per API request (default: 1000, max: 1000)
+- `-s, --sort` - Sort order (default: `-timestamp`)
+- `--auto-paginate` - Fetch multiple pages automatically
+
+**list signals:**
+- `--limit <n>` - Max signals to return (default: 1000)
+
+**list findings:**
+- `--limit <n>` - Max findings to return
+- Positional FILTER: tag filter string
+
+**list errors:**
+- `--service <name>` - Filter by service name
+- `--limit <n>` - Max issues to return
+
+**list pipelines / list tests:**
+- `--service <name>` - Filter by service/pipeline name
+- `--limit <n>` - Max events to return
+
+**list devices:**
+- `--limit <n>` - Max devices to return
+- Positional FILTER: query string
+
+**list dependencies:**
+- Positional SERVICE: source service name (filter by `fromNode`)
+- `--limit <n>` - Max relations to return
 
 **aggregate connections:**
 - `-t, --tags <csv>` - Filter by tags
@@ -273,6 +369,19 @@ Syntax: `--compute '[name=]<aggregation>:<field>'`
 | `list events` | NDJSON | `.id`, `.attributes.{title,text,tags,timestamp}` |
 | `list monitors` | JSON | Array of monitor objects |
 | `list downtimes` | JSON | Array of downtime objects |
+| `list incidents` | JSON | `.data[].{id,attributes.{title,status,created}}` |
+| `list cases` | JSON | `.data[].{id,attributes.{title,state,priority}}` |
+| `list dashboards` | JSON | `.dashboards[].{id,title,url}` |
+| `list notebooks` | JSON | `.data[].{id,attributes.{name,author}}` |
+| `list synthetics` | JSON | `.tests[].{public_id,name,type,status}` |
+| `list rum` | NDJSON | `.attributes.{service,session,view,action,error,timestamp}` |
+| `list signals` | JSON | `.data[].{id,attributes.{message,status,severity,timestamp}}` |
+| `list findings` | JSON | `.data[].{id,attributes.{rule,status,resource_type}}` |
+| `list errors` | JSON | `.data[].{id,attributes.{message,service,status}}` |
+| `list pipelines` | JSON | `.data[].{id,attributes.{pipeline_name,status,duration}}` |
+| `list tests` | JSON | `.data[].{id,attributes.{test_name,status,service}}` |
+| `list devices` | JSON | `.data[].{id,attributes.{name,ip_address,tags}}` |
+| `list dependencies` | JSON | `.data[].{id,attributes.{from,to,type}}` |
 | `list containers` | JSON | `.data[].attributes.{name,image,tags,created_at}` |
 | `list processes` | JSON | `.data[].attributes.{process_name,pid,cmdline,cpu_percent,mem_percent}` |
 | `aggregate connections` | JSON | `.data[].{attributes,group_by}` (aggregated connection metrics) |
@@ -283,6 +392,17 @@ Syntax: `--compute '[name=]<aggregation>:<field>'`
 | `get monitor` | JSON | Full monitor configuration |
 | `get downtime` | JSON | Full downtime configuration |
 | `get host` | JSON | Full host details |
+| `get incident` | JSON | Full incident with `.data.{id,attributes}` |
+| `get notebook` | JSON | Full notebook with `.data.{id,attributes}` |
+| `get error` | JSON | Full issue with `.data.{id,attributes}` |
+| `get device` | JSON | Full device with `.data.{id,attributes}` |
+| `get case` | JSON | Full case with `.data.{id,attributes}` |
+| `get dashboard` | JSON | Full dashboard definition |
+| `get synthetic` | JSON | Full synthetic test configuration |
+| `get signal` | JSON | Full security signal with `.data.{id,attributes}` |
+| `get finding` | JSON | Full finding with `.data.{id,attributes}` |
+| `get pipeline-event` | JSON | Full pipeline event with `.data.{id,attributes}` |
+| `get test-event` | JSON | Full test event with `.data.{id,attributes}` |
 | `get log` | N/A | API does not support single log retrieval |
 | `validate` | JSON | `{"valid":true}` or `{"valid":false,"error":"..."}` |
 
@@ -539,6 +659,92 @@ dd-cli --from 1h aggregate connections --group-by destination_ip
 # aggregate dns
 dd-cli --from <TIME> aggregate dns [--tags <TAGS>] [--group-by <FIELD>]
 dd-cli --from 1h aggregate dns --group-by query_name
+
+# list incidents
+dd-cli list incidents [--state <STATE>] [--limit <N>]
+dd-cli --from 1d list incidents --state active
+
+# get incident
+dd-cli get incident <INCIDENT_ID>
+
+# list cases
+dd-cli list cases [--state <STATE>] [--priority <PRIORITY>] [--limit <N>] [QUERY]
+dd-cli list cases --state open --priority P1
+
+# get case
+dd-cli get case <CASE_ID>
+
+# list dashboards
+dd-cli list dashboards [FILTER] [--limit <N>]
+dd-cli list dashboards "production"
+
+# get dashboard
+dd-cli get dashboard <DASHBOARD_ID>
+
+# list notebooks
+dd-cli list notebooks [FILTER] [--limit <N>]
+dd-cli list notebooks "runbook"
+
+# get notebook
+dd-cli get notebook <NOTEBOOK_ID>
+
+# list synthetics
+dd-cli list synthetics [FILTER] [--limit <N>]
+dd-cli list synthetics "checkout"
+
+# get synthetic
+dd-cli get synthetic <PUBLIC_ID>
+
+# list rum
+dd-cli --from <TIME> list rum [--service <NAME>] [--limit N] [--auto-paginate] [QUERY]
+dd-cli --from 1h list rum --service web
+dd-cli --from 1h list rum "session.type:user" --service checkout
+
+# list signals
+dd-cli --from <TIME> list signals [--limit <N>] [QUERY]
+dd-cli --from 1h list signals "rule:brute_force"
+
+# get signal
+dd-cli get signal <SIGNAL_ID>
+
+# list findings
+dd-cli list findings [FILTER] [--limit <N>]
+dd-cli list findings "env:prod"
+
+# get finding
+dd-cli get finding <FINDING_ID>
+
+# list errors
+dd-cli list errors [--service <NAME>] [--limit <N>] [QUERY]
+dd-cli list errors --service api
+
+# get error
+dd-cli get error <ISSUE_ID>
+
+# list pipelines
+dd-cli --from <TIME> list pipelines [--service <NAME>] [--limit <N>] [QUERY]
+dd-cli --from 1d list pipelines --service my-pipeline
+
+# get pipeline-event
+dd-cli get pipeline-event <EVENT_ID>
+
+# list tests
+dd-cli --from <TIME> list tests [--service <NAME>] [--limit <N>] [QUERY]
+dd-cli --from 1d list tests --service my-suite
+
+# get test-event
+dd-cli get test-event <EVENT_ID>
+
+# list devices
+dd-cli list devices [FILTER] [--limit <N>]
+dd-cli list devices "router"
+
+# get device
+dd-cli get device <DEVICE_ID>
+
+# list dependencies
+dd-cli list dependencies [SERVICE] [--limit <N>]
+dd-cli list dependencies "checkout-service"
 ```
 
 ## Field Naming

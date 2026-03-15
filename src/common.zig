@@ -825,6 +825,9 @@ pub fn streamEventsSearch(
     defer if (cursor) |c| allocator.free(c); // Free cursor at end of function
     var page_num: usize = 1;
 
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
     while (true) {
         // Check if we've hit the limit
         if (limit) |max| {
@@ -843,13 +846,6 @@ pub fn streamEventsSearch(
 
         // Serialize to JSON using fmt
         const body = try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(request, .{ .emit_null_optional_fields = false })});
-
-        // Execute request
-        // Use outer allocator for client to survive arena reset
-        var client: std.http.Client = .{
-            .allocator = allocator,
-        };
-        defer client.deinit();
 
         // Use outer allocator for body_writer so it survives arena reset
         var body_writer = std.Io.Writer.Allocating.init(allocator);

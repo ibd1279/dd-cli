@@ -61,6 +61,9 @@ fn streamLogsSearch(
     defer if (cursor) |c| allocator.free(c); // Free cursor at end of function
     var page_num: usize = 1;
 
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
     while (true) {
         // Check if we've hit the limit
         if (limit) |max| {
@@ -80,13 +83,6 @@ fn streamLogsSearch(
 
         // Serialize to JSON using fmt
         const body = try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(request, .{ .emit_null_optional_fields = false })});
-
-        // Execute request
-        // Use outer allocator for client to survive arena reset
-        var client: std.http.Client = .{
-            .allocator = allocator,
-        };
-        defer client.deinit();
 
         // Use outer allocator for body_writer so it survives arena reset
         var body_writer = std.Io.Writer.Allocating.init(allocator);
@@ -215,6 +211,9 @@ fn streamSpansSearch(
     defer if (cursor) |c| allocator.free(c);
     var page_num: usize = 1;
 
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
     while (true) {
         // Check if we've hit the limit
         if (limit) |max| {
@@ -280,11 +279,6 @@ fn streamSpansSearch(
         );
 
         // Execute request
-        var client: std.http.Client = .{
-            .allocator = allocator,
-        };
-        defer client.deinit();
-
         var body_writer = std.Io.Writer.Allocating.init(allocator);
         defer body_writer.deinit();
 
@@ -445,13 +439,10 @@ pub fn handleLogsSearch(
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
     // Build headers (need Content-Type for POST, Accept-Encoding to disable compression)
-    const base_count = 5; // DD-API-KEY, DD-APPLICATION-KEY, Accept, Content-Type, Accept-Encoding
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
-    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
-    headers[4] = .{ .name = "Accept-Encoding", .value = "identity" }; // Disable compression
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     // Stream logs with pagination using API types
@@ -669,13 +660,10 @@ pub fn handleSpansSearch(
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
     // Build headers
-    const base_count = 5;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
-    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
-    headers[4] = .{ .name = "Accept-Encoding", .value = "identity" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     // Stream spans with pagination
@@ -737,13 +725,10 @@ pub fn handleEventsSearch(
     const path = "/api/v2/events/search";
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
-    const base_count = 5;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
-    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
-    headers[4] = .{ .name = "Accept-Encoding", .value = "identity" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     // Stream events with pagination
@@ -914,6 +899,608 @@ pub fn handleProcessesList(
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
 
+    try common.writeOutput(response);
+}
+
+// ============================================================================
+// New List Command Handlers
+// ============================================================================
+
+pub fn handleIncidentsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const state = cmd_matches.getSingleValue("state");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/incidents";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (state) |s| try params_list.append(arena_alloc, .{ .key = "filter[state]", .value = s });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
+    if (ctx.from_explicit) {
+        if (ctx.from_timestamp) |from| try params_list.append(arena_alloc, .{ .key = "filter[created_at][start]", .value = from });
+        if (ctx.to_timestamp) |to| try params_list.append(arena_alloc, .{ .key = "filter[created_at][end]", .value = to });
+    }
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleDashboardsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v1/dashboard";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[name]", .value = f });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "count", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleNotebooksList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v1/notebooks";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "query", .value = f });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "count", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+/// Stream RUM events with automatic pagination (POST-based, same structure as spans)
+fn streamRumSearch(
+    allocator: std.mem.Allocator,
+    url_base: []const u8,
+    headers: []const std.http.Header,
+    from_timestamp: ?[]const u8,
+    to_timestamp: ?[]const u8,
+    query: []const u8,
+    page_limit: i64,
+    sort: ?[]const u8,
+    limit: ?usize,
+    auto_paginate: bool,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var total_output: usize = 0;
+    var cursor: ?[]const u8 = null;
+    defer if (cursor) |c| allocator.free(c);
+    var page_num: usize = 1;
+
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    while (true) {
+        if (limit) |max| {
+            if (total_output >= max) break;
+        }
+
+        const escaped_query = try common.jsonEscape(arena.allocator(), query);
+        defer arena.allocator().free(escaped_query);
+
+        const from_json = if (from_timestamp) |from| blk: {
+            const escaped = try common.jsonEscape(arena.allocator(), from);
+            defer arena.allocator().free(escaped);
+            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
+        } else try arena.allocator().dupe(u8, "null");
+
+        const to_json = if (to_timestamp) |to| blk: {
+            const escaped = try common.jsonEscape(arena.allocator(), to);
+            defer arena.allocator().free(escaped);
+            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
+        } else try arena.allocator().dupe(u8, "null");
+
+        const cursor_json = if (cursor) |c| blk: {
+            const escaped = try common.jsonEscape(arena.allocator(), c);
+            defer arena.allocator().free(escaped);
+            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
+        } else try arena.allocator().dupe(u8, "null");
+
+        const sort_json = if (sort) |s| blk: {
+            const escaped = try common.jsonEscape(arena.allocator(), s);
+            defer arena.allocator().free(escaped);
+            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
+        } else try arena.allocator().dupe(u8, "\"-timestamp\"");
+
+        const body = try std.fmt.allocPrint(
+            arena.allocator(),
+            \\{{
+            \\  "filter": {{
+            \\    "from": {s},
+            \\    "to": {s},
+            \\    "query": "{s}"
+            \\  }},
+            \\  "sort": {s},
+            \\  "page": {{
+            \\    "limit": {d},
+            \\    "cursor": {s}
+            \\  }}
+            \\}}
+            ,
+            .{
+                from_json,
+                to_json,
+                escaped_query,
+                sort_json,
+                page_limit,
+                cursor_json,
+            },
+        );
+
+        var body_writer = std.Io.Writer.Allocating.init(allocator);
+        defer body_writer.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url_base },
+            .method = .POST,
+            .extra_headers = headers,
+            .response_writer = &body_writer.writer,
+            .payload = body,
+        }) catch |err| {
+            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
+            std.debug.print("Successfully retrieved {d} RUM events before failure.\n", .{total_output});
+            std.debug.print("Network error: {}\n", .{err});
+            return err;
+        };
+
+        if (result.status != .ok) {
+            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
+            const response_body = body_writer.written();
+            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
+                std.debug.print("Response: {s}\n", .{response_body});
+            }
+            if (result.status == .too_many_requests) {
+                std.debug.print("Successfully retrieved {d} RUM events before rate limit.\n", .{total_output});
+                std.debug.print("Consider reducing --limit or narrowing query.\n", .{});
+            } else if (page_num > 1) {
+                std.debug.print("Successfully retrieved {d} RUM events before failure.\n", .{total_output});
+            }
+            return error.RequestFailed;
+        }
+
+        const response_body = body_writer.written();
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            arena.allocator(),
+            response_body,
+            .{},
+        ) catch |err| {
+            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
+            std.debug.print("Successfully retrieved {d} RUM events before failure.\n", .{total_output});
+            return err;
+        };
+
+        const data_array = if (parsed.value.object.get("data")) |data|
+            if (data == .array) data.array else return error.InvalidResponse
+        else
+            return error.InvalidResponse;
+
+        for (data_array.items) |item| {
+            if (limit) |max| {
+                if (total_output >= max) break;
+            }
+            try common.writeLogLine(allocator, item);
+            total_output += 1;
+        }
+
+        if (!auto_paginate) {
+            parsed.deinit();
+            break;
+        }
+
+        const next_cursor = if (parsed.value.object.get("meta")) |meta|
+            if (meta.object.get("page")) |page_meta|
+                if (page_meta.object.get("after")) |after|
+                    if (after == .string) after.string else null
+                else
+                    null
+            else
+                null
+        else
+            null;
+
+        if (next_cursor == null) {
+            parsed.deinit();
+            break;
+        }
+
+        if (cursor) |old_cursor| allocator.free(old_cursor);
+        cursor = try allocator.dupe(u8, next_cursor.?);
+        page_num += 1;
+        parsed.deinit();
+        _ = arena.reset(.retain_capacity);
+    }
+}
+
+pub fn handleRumSearch(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const base_filter = cmd_matches.getSingleValue("FILTER") orelse "*";
+    const service = cmd_matches.getSingleValue("service");
+    const sort = cmd_matches.getSingleValue("sort") orelse "-timestamp";
+    const auto_paginate = cmd_matches.containsArg("auto-paginate");
+
+    // Build query, optionally adding service filter
+    const query = if (service) |svc| blk: {
+        if (std.mem.eql(u8, base_filter, "*")) {
+            break :blk try std.fmt.allocPrint(arena_alloc, "service:{s}", .{svc});
+        } else {
+            break :blk try std.fmt.allocPrint(arena_alloc, "{s} service:{s}", .{ base_filter, svc });
+        }
+    } else base_filter;
+
+    const page_size_str = cmd_matches.getSingleValue("page-size");
+    const page_size = if (page_size_str) |ps_str|
+        std.fmt.parseInt(usize, ps_str, 10) catch {
+            std.debug.print("Error: Invalid page-size value '{s}'. Must be a positive integer.\n", .{ps_str});
+            return error.InvalidPageSize;
+        }
+    else
+        common.DATADOG_DEFAULT_PAGE_SIZE;
+
+    if (page_size > common.DATADOG_MAX_PAGE_SIZE) {
+        std.debug.print("Error: page-size cannot exceed {d} (API limit)\n", .{common.DATADOG_MAX_PAGE_SIZE});
+        return error.PageSizeTooLarge;
+    }
+
+    const limit_str = cmd_matches.getSingleValue("limit");
+    const limit: ?usize = if (limit_str) |l_str|
+        std.fmt.parseInt(usize, l_str, 10) catch {
+            std.debug.print("Error: Invalid limit value '{s}'. Must be a positive integer.\n", .{l_str});
+            return error.InvalidLimit;
+        }
+    else if (auto_paginate)
+        null
+    else
+        common.DATADOG_DEFAULT_PAGE_SIZE;
+
+    const path = "/api/v2/rum/events/search";
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
+
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    try streamRumSearch(
+        ctx.allocator,
+        url,
+        headers,
+        ctx.from_timestamp,
+        ctx.to_timestamp,
+        query,
+        @intCast(page_size),
+        sort,
+        limit,
+        auto_paginate,
+    );
+}
+
+pub fn handleErrorsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const service = cmd_matches.getSingleValue("service");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/error-tracking/issues";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "query", .value = f });
+    if (service) |s| try params_list.append(arena_alloc, .{ .key = "filter[service]", .value = s });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[limit]", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleSignalsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const query = cmd_matches.getSingleValue("FILTER") orelse "*";
+    const limit_str = cmd_matches.getSingleValue("limit");
+    const page_limit: i64 = if (limit_str) |l_str|
+        std.fmt.parseInt(i64, l_str, 10) catch {
+            std.debug.print("Error: Invalid limit value '{s}'. Must be a positive integer.\n", .{l_str});
+            return error.InvalidLimit;
+        }
+    else
+        1000;
+
+    const path = "/api/v2/security_monitoring/signals/search";
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const escaped_query = try common.jsonEscape(arena_alloc, query);
+    const from_json = if (ctx.from_timestamp) |from| blk: {
+        const escaped = try common.jsonEscape(arena_alloc, from);
+        break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+    } else try arena_alloc.dupe(u8, "null");
+
+    const to_json = if (ctx.to_timestamp) |to| blk: {
+        const escaped = try common.jsonEscape(arena_alloc, to);
+        break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+    } else try arena_alloc.dupe(u8, "null");
+
+    const body = try std.fmt.allocPrint(
+        arena_alloc,
+        \\{{
+        \\  "filter": {{
+        \\    "query": "{s}",
+        \\    "from": {s},
+        \\    "to": {s}
+        \\  }},
+        \\  "page": {{
+        \\    "limit": {d}
+        \\  }}
+        \\}}
+        ,
+        .{ escaped_query, from_json, to_json, page_limit },
+    );
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
+
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .POST, url, headers, body);
+    try common.writeOutput(response);
+}
+
+pub fn handleFindingsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/security/findings";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[tags]", .value = f });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[limit]", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handlePipelinesList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const service = cmd_matches.getSingleValue("service");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/ci/pipelines/events";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "search", .value = f });
+    if (service) |s| try params_list.append(arena_alloc, .{ .key = "filter[ci_service.name]", .value = s });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
+    if (ctx.from_timestamp) |from| try params_list.append(arena_alloc, .{ .key = "filter[from]", .value = from });
+    if (ctx.to_timestamp) |to| try params_list.append(arena_alloc, .{ .key = "filter[to]", .value = to });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleTestsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const service = cmd_matches.getSingleValue("service");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/ci/tests/events";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "search", .value = f });
+    if (service) |s| try params_list.append(arena_alloc, .{ .key = "filter[service]", .value = s });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
+    if (ctx.from_timestamp) |from| try params_list.append(arena_alloc, .{ .key = "filter[from]", .value = from });
+    if (ctx.to_timestamp) |to| try params_list.append(arena_alloc, .{ .key = "filter[to]", .value = to });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleSyntheticsList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v1/synthetics/tests";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[text]", .value = f });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page_size", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleDevicesList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/ndm/devices";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[query]", .value = f });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleCasesList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const filter = cmd_matches.getSingleValue("FILTER");
+    const state = cmd_matches.getSingleValue("state");
+    const priority = cmd_matches.getSingleValue("priority");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/cases";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (filter) |f| try params_list.append(arena_alloc, .{ .key = "search", .value = f });
+    if (state) |s| try params_list.append(arena_alloc, .{ .key = "filter[state]", .value = s });
+    if (priority) |p| try params_list.append(arena_alloc, .{ .key = "filter[priority]", .value = p });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleDependenciesList(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const service = cmd_matches.getSingleValue("SERVICE");
+    const limit = cmd_matches.getSingleValue("limit");
+
+    const path = "/api/v2/catalog/relation";
+
+    var params_list: std.ArrayList(QueryParam) = .empty;
+    defer params_list.deinit(arena_alloc);
+
+    if (service) |s| try params_list.append(arena_alloc, .{ .key = "filter[fromNode]", .value = s });
+    if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[limit]", .value = l });
+
+    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
     try common.writeOutput(response);
 }
 

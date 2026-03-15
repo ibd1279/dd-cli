@@ -152,46 +152,10 @@ pub fn handleEventGet(
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/events/{s}", .{event_id});
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
-    const base_count = 3;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
 
-    // Execute request with custom error handling
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    var client: std.http.Client = .{ .allocator = ctx.allocator };
-    defer client.deinit();
-
-    var body_writer = std.Io.Writer.Allocating.init(ctx.allocator);
-    defer body_writer.deinit();
-
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .extra_headers = headers,
-        .response_writer = &body_writer.writer,
-    }) catch |err| {
-        std.debug.print("Error: Network request failed: {}\n", .{err});
-        return err;
-    };
-
-    // Check response status with custom error message
-    if (result.status != .ok) {
-        if (result.status == .not_found) {
-            std.debug.print("Error: Event not found with ID: {s}\n", .{event_id});
-        } else {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-        }
-        return error.RequestFailed;
-    }
-
-    const response = try ctx.allocator.dupe(u8, body_writer.written());
-    defer ctx.allocator.free(response);
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
     try common.writeOutput(response);
 }
 
@@ -214,46 +178,10 @@ pub fn handleMonitorGet(
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/monitor/{s}", .{monitor_id});
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
-    const base_count = 3;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
 
-    // Execute request with custom error handling
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    var client: std.http.Client = .{ .allocator = ctx.allocator };
-    defer client.deinit();
-
-    var body_writer = std.Io.Writer.Allocating.init(ctx.allocator);
-    defer body_writer.deinit();
-
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .extra_headers = headers,
-        .response_writer = &body_writer.writer,
-    }) catch |err| {
-        std.debug.print("Error: Network request failed: {}\n", .{err});
-        return err;
-    };
-
-    // Check response status with custom error message
-    if (result.status != .ok) {
-        if (result.status == .not_found) {
-            std.debug.print("Error: Monitor {s} not found (404)\n", .{monitor_id});
-        } else {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-        }
-        return error.RequestFailed;
-    }
-
-    const response = try ctx.allocator.dupe(u8, body_writer.written());
-    defer ctx.allocator.free(response);
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
     try common.writeOutput(response);
 }
 
@@ -276,46 +204,266 @@ pub fn handleDowntimeGet(
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/downtime/{s}", .{downtime_id});
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
-    const base_count = 3;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
 
-    // Execute request with custom error handling
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    var client: std.http.Client = .{ .allocator = ctx.allocator };
-    defer client.deinit();
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
 
-    var body_writer = std.Io.Writer.Allocating.init(ctx.allocator);
-    defer body_writer.deinit();
+pub fn handleIncidentGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
 
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .extra_headers = headers,
-        .response_writer = &body_writer.writer,
-    }) catch |err| {
-        std.debug.print("Error: Network request failed: {}\n", .{err});
-        return err;
+    const incident_id = cmd_matches.getSingleValue("INCIDENT_ID") orelse {
+        std.debug.print("Error: INCIDENT_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get incident <INCIDENT_ID>\n", .{});
+        return error.MissingIncidentId;
     };
 
-    // Check response status with custom error message
-    if (result.status != .ok) {
-        if (result.status == .not_found) {
-            std.debug.print("Error: Downtime {s} not found (404)\n", .{downtime_id});
-        } else {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-        }
-        return error.RequestFailed;
-    }
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/incidents/{s}", .{incident_id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
-    const response = try ctx.allocator.dupe(u8, body_writer.written());
-    defer ctx.allocator.free(response);
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleNotebookGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const notebook_id = cmd_matches.getSingleValue("NOTEBOOK_ID") orelse {
+        std.debug.print("Error: NOTEBOOK_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get notebook <NOTEBOOK_ID>\n", .{});
+        return error.MissingNotebookId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/notebooks/{s}", .{notebook_id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleErrorGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const issue_id = cmd_matches.getSingleValue("ISSUE_ID") orelse {
+        std.debug.print("Error: ISSUE_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get error <ISSUE_ID>\n", .{});
+        return error.MissingIssueId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/error-tracking/issues/{s}", .{issue_id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleDeviceGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const device_id = cmd_matches.getSingleValue("DEVICE_ID") orelse {
+        std.debug.print("Error: DEVICE_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get device <DEVICE_ID>\n", .{});
+        return error.MissingDeviceId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/ndm/devices/{s}", .{device_id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleCaseGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const case_id = cmd_matches.getSingleValue("CASE_ID") orelse {
+        std.debug.print("Error: CASE_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get case <CASE_ID>\n", .{});
+        return error.MissingCaseId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/cases/{s}", .{case_id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleDashboardGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const id = cmd_matches.getSingleValue("DASHBOARD_ID") orelse {
+        std.debug.print("Error: DASHBOARD_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get dashboard <DASHBOARD_ID>\n", .{});
+        return error.MissingDashboardId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/dashboard/{s}", .{id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleSyntheticGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const id = cmd_matches.getSingleValue("PUBLIC_ID") orelse {
+        std.debug.print("Error: PUBLIC_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get synthetic <PUBLIC_ID>\n", .{});
+        return error.MissingPublicId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/synthetics/tests/{s}", .{id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleSignalGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const id = cmd_matches.getSingleValue("SIGNAL_ID") orelse {
+        std.debug.print("Error: SIGNAL_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get signal <SIGNAL_ID>\n", .{});
+        return error.MissingSignalId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/security_monitoring/signals/{s}", .{id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleFindingGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const id = cmd_matches.getSingleValue("FINDING_ID") orelse {
+        std.debug.print("Error: FINDING_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get finding <FINDING_ID>\n", .{});
+        return error.MissingFindingId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/security/findings/{s}", .{id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handlePipelineEventGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const id = cmd_matches.getSingleValue("EVENT_ID") orelse {
+        std.debug.print("Error: EVENT_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get pipeline-event <EVENT_ID>\n", .{});
+        return error.MissingEventId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/ci/pipelines/events/{s}", .{id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    try common.writeOutput(response);
+}
+
+pub fn handleTestEventGet(
+    ctx: *const common.Context,
+    cmd_matches: *const yazap.ArgMatches,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const id = cmd_matches.getSingleValue("EVENT_ID") orelse {
+        std.debug.print("Error: EVENT_ID argument is required\n", .{});
+        std.debug.print("\nUsage: dd-cli get test-event <EVENT_ID>\n", .{});
+        return error.MissingEventId;
+    };
+
+    const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/ci/tests/events/{s}", .{id});
+    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
+
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
     try common.writeOutput(response);
 }
 

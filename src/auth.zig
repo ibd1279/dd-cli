@@ -59,13 +59,13 @@ pub fn saveToken(
 
     if (refresh_token) |rt| {
         try writer.print(
-            "{{\"access_token\":\"{s}\",\"expires_at\":{d},\"refresh_token\":\"{s}\"}}",
-            .{ access_token, expires_at, rt },
+            "{{\"access_token\":{f},\"expires_at\":{d},\"refresh_token\":{f}}}",
+            .{ std.json.fmt(access_token, .{}), expires_at, std.json.fmt(rt, .{}) },
         );
     } else {
         try writer.print(
-            "{{\"access_token\":\"{s}\",\"expires_at\":{d}}}",
-            .{ access_token, expires_at },
+            "{{\"access_token\":{f},\"expires_at\":{d}}}",
+            .{ std.json.fmt(access_token, .{}), expires_at },
         );
     }
 
@@ -126,11 +126,11 @@ pub fn saveClientCredentials(
 
     if (client_secret) |cs| {
         try writer.print(
-            "{{\"client_id\":\"{s}\",\"client_secret\":\"{s}\"}}",
-            .{ client_id, cs },
+            "{{\"client_id\":{f},\"client_secret\":{f}}}",
+            .{ std.json.fmt(client_id, .{}), std.json.fmt(cs, .{}) },
         );
     } else {
-        try writer.print("{{\"client_id\":\"{s}\"}}", .{client_id});
+        try writer.print("{{\"client_id\":{f}}}", .{std.json.fmt(client_id, .{})});
     }
 
     const file = try std.fs.cwd().createFile(creds_path, .{ .truncate = true });
@@ -486,7 +486,11 @@ pub fn handleLoginCommand(
     std.debug.print("If the browser does not open, visit:\n  {s}\n\n", .{auth_url});
 
     // Try to open the browser (best-effort; ignore errors).
-    var child = std.process.Child.init(&.{ "open", auth_url }, allocator);
+    const open_cmd = switch (@import("builtin").os.tag) {
+        .macos => "open",
+        else => "xdg-open",
+    };
+    var child = std.process.Child.init(&.{ open_cmd, auth_url }, allocator);
     _ = child.spawnAndWait() catch {};
 
     std.debug.print("Waiting for authorization callback...\n", .{});

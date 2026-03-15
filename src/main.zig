@@ -139,6 +139,120 @@ pub fn main() !void {
     try list_processes_cmd.addArg(Arg.singleValueOption("cursor", 'c', "Pagination cursor"));
     try list_cmd.addSubcommand(list_processes_cmd);
 
+    // list incidents [FILTER]
+    var list_incidents_cmd = app.createCommand("incidents", "List incidents");
+    var incidents_filter_arg = Arg.positional("FILTER", "Incident filter query (optional)", null);
+    incidents_filter_arg.setMinValues(0);
+    try list_incidents_cmd.addArg(incidents_filter_arg);
+    try list_incidents_cmd.addArg(Arg.singleValueOption("state", null, "Filter by state (active, stable, resolved)"));
+    try list_incidents_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max incidents to return"));
+    try list_cmd.addSubcommand(list_incidents_cmd);
+
+    // list dashboards [FILTER]
+    var list_dashboards_cmd = app.createCommand("dashboards", "List dashboards");
+    var dashboards_filter_arg = Arg.positional("FILTER", "Filter by dashboard name (optional)", null);
+    dashboards_filter_arg.setMinValues(0);
+    try list_dashboards_cmd.addArg(dashboards_filter_arg);
+    try list_dashboards_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max dashboards to return"));
+    try list_cmd.addSubcommand(list_dashboards_cmd);
+
+    // list notebooks [FILTER]
+    var list_notebooks_cmd = app.createCommand("notebooks", "List notebooks");
+    var notebooks_filter_arg = Arg.positional("FILTER", "Text search query (optional)", null);
+    notebooks_filter_arg.setMinValues(0);
+    try list_notebooks_cmd.addArg(notebooks_filter_arg);
+    try list_notebooks_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max notebooks to return"));
+    try list_cmd.addSubcommand(list_notebooks_cmd);
+
+    // list rum [FILTER]
+    var list_rum_cmd = app.createCommand("rum", "List RUM events");
+    var rum_filter_arg = Arg.positional("FILTER", "RUM filter query (default: *)", null);
+    rum_filter_arg.setMinValues(0);
+    try list_rum_cmd.addArg(rum_filter_arg);
+    try list_rum_cmd.addArg(Arg.singleValueOption("service", null, "Filter by service name"));
+    try list_rum_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max total RUM events (default: 1000 without --auto-paginate, unlimited with)"));
+    try list_rum_cmd.addArg(Arg.singleValueOption("page-size", null, "RUM events per API request (default: 1000, max: 1000)"));
+    try list_rum_cmd.addArg(Arg.singleValueOption("sort", 's', "Sort order (default: -timestamp)"));
+    try list_rum_cmd.addArg(Arg.booleanOption("auto-paginate", null, "Fetch multiple pages automatically"));
+    try list_cmd.addSubcommand(list_rum_cmd);
+
+    // list errors [FILTER]
+    var list_errors_cmd = app.createCommand("errors", "List error tracking issues");
+    var errors_filter_arg = Arg.positional("FILTER", "Error filter query (optional)", null);
+    errors_filter_arg.setMinValues(0);
+    try list_errors_cmd.addArg(errors_filter_arg);
+    try list_errors_cmd.addArg(Arg.singleValueOption("service", null, "Filter by service name"));
+    try list_errors_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max issues to return"));
+    try list_cmd.addSubcommand(list_errors_cmd);
+
+    // list signals [FILTER]
+    var list_signals_cmd = app.createCommand("signals", "List security monitoring signals");
+    var signals_filter_arg = Arg.positional("FILTER", "Signal filter query (default: *)", null);
+    signals_filter_arg.setMinValues(0);
+    try list_signals_cmd.addArg(signals_filter_arg);
+    try list_signals_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max signals to return"));
+    try list_cmd.addSubcommand(list_signals_cmd);
+
+    // list findings [FILTER]
+    var list_findings_cmd = app.createCommand("findings", "List security findings");
+    var findings_filter_arg = Arg.positional("FILTER", "Filter by tags (optional)", null);
+    findings_filter_arg.setMinValues(0);
+    try list_findings_cmd.addArg(findings_filter_arg);
+    try list_findings_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max findings to return"));
+    try list_cmd.addSubcommand(list_findings_cmd);
+
+    // list pipelines [FILTER]
+    var list_pipelines_cmd = app.createCommand("pipelines", "List CI pipelines");
+    var pipelines_filter_arg = Arg.positional("FILTER", "Search filter (optional)", null);
+    pipelines_filter_arg.setMinValues(0);
+    try list_pipelines_cmd.addArg(pipelines_filter_arg);
+    try list_pipelines_cmd.addArg(Arg.singleValueOption("service", null, "Filter by CI service name"));
+    try list_pipelines_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max pipelines to return"));
+    try list_cmd.addSubcommand(list_pipelines_cmd);
+
+    // list tests [FILTER]
+    var list_tests_cmd = app.createCommand("tests", "List CI test runs");
+    var tests_filter_arg = Arg.positional("FILTER", "Search filter (optional)", null);
+    tests_filter_arg.setMinValues(0);
+    try list_tests_cmd.addArg(tests_filter_arg);
+    try list_tests_cmd.addArg(Arg.singleValueOption("service", null, "Filter by service name"));
+    try list_tests_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max test runs to return"));
+    try list_cmd.addSubcommand(list_tests_cmd);
+
+    // list synthetics [FILTER]
+    var list_synthetics_cmd = app.createCommand("synthetics", "List synthetic tests");
+    var synthetics_filter_arg = Arg.positional("FILTER", "Filter by text (optional)", null);
+    synthetics_filter_arg.setMinValues(0);
+    try list_synthetics_cmd.addArg(synthetics_filter_arg);
+    try list_synthetics_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max synthetic tests to return"));
+    try list_cmd.addSubcommand(list_synthetics_cmd);
+
+    // list devices [FILTER]
+    var list_devices_cmd = app.createCommand("devices", "List NDM network devices");
+    var devices_filter_arg = Arg.positional("FILTER", "Filter query (optional)", null);
+    devices_filter_arg.setMinValues(0);
+    try list_devices_cmd.addArg(devices_filter_arg);
+    try list_devices_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max devices to return"));
+    try list_cmd.addSubcommand(list_devices_cmd);
+
+    // list cases [FILTER]
+    var list_cases_cmd = app.createCommand("cases", "List cases");
+    var cases_filter_arg = Arg.positional("FILTER", "Search filter (optional)", null);
+    cases_filter_arg.setMinValues(0);
+    try list_cases_cmd.addArg(cases_filter_arg);
+    try list_cases_cmd.addArg(Arg.singleValueOption("state", null, "Filter by state (open, closed)"));
+    try list_cases_cmd.addArg(Arg.singleValueOption("priority", null, "Filter by priority (P1..P5)"));
+    try list_cases_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max cases to return"));
+    try list_cmd.addSubcommand(list_cases_cmd);
+
+    // list dependencies [SERVICE]
+    var list_dependencies_cmd = app.createCommand("dependencies", "List service catalog dependencies");
+    var dependencies_service_arg = Arg.positional("SERVICE", "Source service node (optional)", null);
+    dependencies_service_arg.setMinValues(0);
+    try list_dependencies_cmd.addArg(dependencies_service_arg);
+    try list_dependencies_cmd.addArg(Arg.singleValueOption("limit", 'n', "Max dependencies to return"));
+    try list_cmd.addSubcommand(list_dependencies_cmd);
+
     try root.addSubcommand(list_cmd);
 
     // aggregate command - compute statistics
@@ -226,6 +340,55 @@ pub fn main() !void {
     try get_downtime_cmd.addArg(Arg.positional("DOWNTIME_ID", "Downtime identifier", null));
     try get_cmd.addSubcommand(get_downtime_cmd);
 
+    // get incident <INCIDENT_ID>
+    var get_incident_cmd = app.createCommand("incident", "Get a specific incident by ID");
+    try get_incident_cmd.addArg(Arg.positional("INCIDENT_ID", "Incident identifier", null));
+    try get_cmd.addSubcommand(get_incident_cmd);
+
+    // get notebook <NOTEBOOK_ID>
+    var get_notebook_cmd = app.createCommand("notebook", "Get a specific notebook by ID");
+    try get_notebook_cmd.addArg(Arg.positional("NOTEBOOK_ID", "Notebook identifier", null));
+    try get_cmd.addSubcommand(get_notebook_cmd);
+
+    // get error <ISSUE_ID>
+    var get_error_cmd = app.createCommand("error", "Get a specific error tracking issue by ID");
+    try get_error_cmd.addArg(Arg.positional("ISSUE_ID", "Error tracking issue identifier", null));
+    try get_cmd.addSubcommand(get_error_cmd);
+
+    // get device <DEVICE_ID>
+    var get_device_cmd = app.createCommand("device", "Get a specific NDM device by ID");
+    try get_device_cmd.addArg(Arg.positional("DEVICE_ID", "Device identifier", null));
+    try get_cmd.addSubcommand(get_device_cmd);
+
+    // get case <CASE_ID>
+    var get_case_cmd = app.createCommand("case", "Get a specific case by ID");
+    try get_case_cmd.addArg(Arg.positional("CASE_ID", "Case identifier", null));
+    try get_cmd.addSubcommand(get_case_cmd);
+
+    var get_dashboard_cmd = app.createCommand("dashboard", "Get a specific dashboard by ID");
+    try get_dashboard_cmd.addArg(Arg.positional("DASHBOARD_ID", "Dashboard identifier", null));
+    try get_cmd.addSubcommand(get_dashboard_cmd);
+
+    var get_synthetic_cmd = app.createCommand("synthetic", "Get a specific synthetic test by public ID");
+    try get_synthetic_cmd.addArg(Arg.positional("PUBLIC_ID", "Synthetic test public identifier", null));
+    try get_cmd.addSubcommand(get_synthetic_cmd);
+
+    var get_signal_cmd = app.createCommand("signal", "Get a specific security signal by ID");
+    try get_signal_cmd.addArg(Arg.positional("SIGNAL_ID", "Security signal identifier", null));
+    try get_cmd.addSubcommand(get_signal_cmd);
+
+    var get_finding_cmd = app.createCommand("finding", "Get a specific security finding by ID");
+    try get_finding_cmd.addArg(Arg.positional("FINDING_ID", "Security finding identifier", null));
+    try get_cmd.addSubcommand(get_finding_cmd);
+
+    var get_pipeline_event_cmd = app.createCommand("pipeline-event", "Get a specific CI pipeline event by ID");
+    try get_pipeline_event_cmd.addArg(Arg.positional("EVENT_ID", "CI pipeline event identifier", null));
+    try get_cmd.addSubcommand(get_pipeline_event_cmd);
+
+    var get_test_event_cmd = app.createCommand("test-event", "Get a specific CI test event by ID");
+    try get_test_event_cmd.addArg(Arg.positional("EVENT_ID", "CI test event identifier", null));
+    try get_cmd.addSubcommand(get_test_event_cmd);
+
     try root.addSubcommand(get_cmd);
 
     // validate command - credential validation (unchanged)
@@ -304,8 +467,34 @@ pub fn main() !void {
             try list.handleContainersList(&ctx, containers_matches);
         } else if (list_matches.subcommandMatches("processes")) |*processes_matches| {
             try list.handleProcessesList(&ctx, processes_matches);
+        } else if (list_matches.subcommandMatches("incidents")) |*incidents_matches| {
+            try list.handleIncidentsList(&ctx, incidents_matches);
+        } else if (list_matches.subcommandMatches("dashboards")) |*dashboards_matches| {
+            try list.handleDashboardsList(&ctx, dashboards_matches);
+        } else if (list_matches.subcommandMatches("notebooks")) |*notebooks_matches| {
+            try list.handleNotebooksList(&ctx, notebooks_matches);
+        } else if (list_matches.subcommandMatches("rum")) |*rum_matches| {
+            try list.handleRumSearch(&ctx, rum_matches);
+        } else if (list_matches.subcommandMatches("errors")) |*errors_matches| {
+            try list.handleErrorsList(&ctx, errors_matches);
+        } else if (list_matches.subcommandMatches("signals")) |*signals_matches| {
+            try list.handleSignalsList(&ctx, signals_matches);
+        } else if (list_matches.subcommandMatches("findings")) |*findings_matches| {
+            try list.handleFindingsList(&ctx, findings_matches);
+        } else if (list_matches.subcommandMatches("pipelines")) |*pipelines_matches| {
+            try list.handlePipelinesList(&ctx, pipelines_matches);
+        } else if (list_matches.subcommandMatches("tests")) |*tests_matches| {
+            try list.handleTestsList(&ctx, tests_matches);
+        } else if (list_matches.subcommandMatches("synthetics")) |*synthetics_matches| {
+            try list.handleSyntheticsList(&ctx, synthetics_matches);
+        } else if (list_matches.subcommandMatches("devices")) |*devices_matches| {
+            try list.handleDevicesList(&ctx, devices_matches);
+        } else if (list_matches.subcommandMatches("cases")) |*cases_matches| {
+            try list.handleCasesList(&ctx, cases_matches);
+        } else if (list_matches.subcommandMatches("dependencies")) |*dependencies_matches| {
+            try list.handleDependenciesList(&ctx, dependencies_matches);
         } else {
-            std.debug.print("Error: Unknown list target. Use 'list logs', 'list hosts', 'list metrics', 'list apis', 'list services', 'list spans', 'list events', 'list monitors', 'list downtimes', 'list containers', or 'list processes'\n", .{});
+            std.debug.print("Error: Unknown list target. Use 'list logs', 'list hosts', 'list metrics', 'list apis', 'list services', 'list spans', 'list events', 'list monitors', 'list downtimes', 'list containers', 'list processes', 'list incidents', 'list dashboards', 'list notebooks', 'list rum', 'list errors', 'list signals', 'list findings', 'list pipelines', 'list tests', 'list synthetics', 'list devices', 'list cases', or 'list dependencies'\n", .{});
             std.debug.print("\nExamples:\n", .{});
             std.debug.print("  dd-cli list logs \"error\" --from 1h\n", .{});
             std.debug.print("  dd-cli list hosts\n", .{});
@@ -317,6 +506,13 @@ pub fn main() !void {
             std.debug.print("  dd-cli list events \"*\" --from 1h\n", .{});
             std.debug.print("  dd-cli list containers --tags \"env:prod\" --from 1h\n", .{});
             std.debug.print("  dd-cli list processes --search \"postgres\" --from 1h\n", .{});
+            std.debug.print("  dd-cli list incidents --state active\n", .{});
+            std.debug.print("  dd-cli list dashboards \"prod\"\n", .{});
+            std.debug.print("  dd-cli list rum --service web --from 1h\n", .{});
+            std.debug.print("  dd-cli list errors --service api --from 1d\n", .{});
+            std.debug.print("  dd-cli list signals --from 1h\n", .{});
+            std.debug.print("  dd-cli list pipelines --service my-service --from 1d\n", .{});
+            std.debug.print("  dd-cli list cases --state open --priority P1\n", .{});
             return error.UnknownSubcommand;
         }
     } else if (matches.subcommandMatches("aggregate")) |*agg_matches| {
@@ -357,13 +553,40 @@ pub fn main() !void {
             try get.handleMonitorGet(&ctx, monitor_matches);
         } else if (get_matches.subcommandMatches("downtime")) |*downtime_matches| {
             try get.handleDowntimeGet(&ctx, downtime_matches);
+        } else if (get_matches.subcommandMatches("incident")) |*incident_matches| {
+            try get.handleIncidentGet(&ctx, incident_matches);
+        } else if (get_matches.subcommandMatches("notebook")) |*notebook_matches| {
+            try get.handleNotebookGet(&ctx, notebook_matches);
+        } else if (get_matches.subcommandMatches("error")) |*error_matches| {
+            try get.handleErrorGet(&ctx, error_matches);
+        } else if (get_matches.subcommandMatches("device")) |*device_matches| {
+            try get.handleDeviceGet(&ctx, device_matches);
+        } else if (get_matches.subcommandMatches("case")) |*case_matches| {
+            try get.handleCaseGet(&ctx, case_matches);
+        } else if (get_matches.subcommandMatches("dashboard")) |*dashboard_matches| {
+            try get.handleDashboardGet(&ctx, dashboard_matches);
+        } else if (get_matches.subcommandMatches("synthetic")) |*synthetic_matches| {
+            try get.handleSyntheticGet(&ctx, synthetic_matches);
+        } else if (get_matches.subcommandMatches("signal")) |*signal_matches| {
+            try get.handleSignalGet(&ctx, signal_matches);
+        } else if (get_matches.subcommandMatches("finding")) |*finding_matches| {
+            try get.handleFindingGet(&ctx, finding_matches);
+        } else if (get_matches.subcommandMatches("pipeline-event")) |*pipeline_event_matches| {
+            try get.handlePipelineEventGet(&ctx, pipeline_event_matches);
+        } else if (get_matches.subcommandMatches("test-event")) |*test_event_matches| {
+            try get.handleTestEventGet(&ctx, test_event_matches);
         } else {
-            std.debug.print("Error: Unknown get target. Use 'get log', 'get host', 'get metrics', 'get api', 'get event', 'get monitor', or 'get downtime'\n", .{});
+            std.debug.print("Error: Unknown get target. Use 'get log', 'get host', 'get metrics', 'get api', 'get event', 'get monitor', 'get downtime', 'get incident', 'get notebook', 'get error', 'get device', 'get case', 'get dashboard', 'get synthetic', 'get signal', 'get finding', 'get pipeline-event', or 'get test-event'\n", .{});
             std.debug.print("\nExamples:\n", .{});
             std.debug.print("  dd-cli get host web-server-01\n", .{});
             std.debug.print("  dd-cli get metrics system.cpu.idle\n", .{});
             std.debug.print("  dd-cli get api <api-id>\n", .{});
             std.debug.print("  dd-cli get event <event-id>\n", .{});
+            std.debug.print("  dd-cli get incident <incident-id>\n", .{});
+            std.debug.print("  dd-cli get notebook <notebook-id>\n", .{});
+            std.debug.print("  dd-cli get error <issue-id>\n", .{});
+            std.debug.print("  dd-cli get device <device-id>\n", .{});
+            std.debug.print("  dd-cli get case <case-id>\n", .{});
             return error.UnknownSubcommand;
         }
     } else if (matches.subcommandMatches("validate")) |*val_matches| {
@@ -373,9 +596,9 @@ pub fn main() !void {
     } else {
         std.debug.print("Error: No subcommand specified.\n", .{});
         std.debug.print("\nAvailable commands:\n", .{});
-        std.debug.print("  list      - List resources (logs, hosts, metrics, apis, services, spans, events, monitors, downtimes, containers, processes)\n", .{});
+        std.debug.print("  list      - List resources (logs, hosts, metrics, apis, services, spans, events, monitors, downtimes, containers, processes, incidents, dashboards, notebooks, rum, errors, signals, findings, pipelines, tests, synthetics, devices, cases, dependencies)\n", .{});
         std.debug.print("  aggregate - Aggregate data (logs, metrics, spans, connections, dns)\n", .{});
-        std.debug.print("  get       - Get specific resource by ID (log, host, metrics, api, event, monitor, downtime)\n", .{});
+        std.debug.print("  get       - Get specific resource by ID (log, host, metrics, api, event, monitor, downtime, incident, notebook, error, device, case, dashboard, synthetic, signal, finding, pipeline-event, test-event)\n", .{});
         std.debug.print("  validate  - Validate API credentials\n", .{});
         std.debug.print("  raw       - Low-level API access\n", .{});
         std.debug.print("  auth      - Manage OAuth2 authentication (login/logout)\n", .{});

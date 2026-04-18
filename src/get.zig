@@ -49,12 +49,7 @@ pub fn handleHostGet(
         .{ .key = "filter", .value = host_name },
     };
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, &query_params);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, &query_params);
 
     // Parse response and extract matching host
     const parsed = try std.json.parseFromSlice(std.json.Value, arena_alloc, response, .{});
@@ -66,9 +61,9 @@ pub fn handleHostGet(
         }
         // Return first matching host as JSON
         const json_output = try common.valueToJson(arena_alloc, host_list[0]);
-        try common.writeOutput(json_output);
+        try common.writeOutput(ctx.io, json_output);
     } else {
-        try common.writeOutput(response);
+        try common.writeOutput(ctx.io, response);
     }
 }
 
@@ -91,15 +86,10 @@ pub fn handleMetricsGet(
     // Build path with metric name embedded
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/metrics/{s}", .{metric_name});
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 /// Handle get api command - get OpenAPI spec for a specific API
@@ -122,15 +112,10 @@ pub fn handleApiGet(
     // Build path with API ID embedded
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/apicatalog/api/{s}/openapi", .{api_id});
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleEventGet(
@@ -150,13 +135,8 @@ pub fn handleEventGet(
 
     // Build path with event_id embedded
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/events/{s}", .{event_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleMonitorGet(
@@ -176,13 +156,8 @@ pub fn handleMonitorGet(
 
     // Build path with monitor_id embedded
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/monitor/{s}", .{monitor_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDowntimeGet(
@@ -202,13 +177,8 @@ pub fn handleDowntimeGet(
 
     // Build path with downtime_id embedded
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/downtime/{s}", .{downtime_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleIncidentGet(
@@ -226,13 +196,8 @@ pub fn handleIncidentGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/incidents/{s}", .{incident_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleNotebookGet(
@@ -250,12 +215,8 @@ pub fn handleNotebookGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/notebooks/{s}", .{notebook_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleErrorGet(
@@ -273,13 +234,8 @@ pub fn handleErrorGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/error-tracking/issues/{s}", .{issue_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDeviceGet(
@@ -297,12 +253,8 @@ pub fn handleDeviceGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/ndm/devices/{s}", .{device_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleCaseGet(
@@ -320,13 +272,8 @@ pub fn handleCaseGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/cases/{s}", .{case_id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDashboardGet(
@@ -344,12 +291,8 @@ pub fn handleDashboardGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/dashboard/{s}", .{id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleSyntheticGet(
@@ -367,12 +310,8 @@ pub fn handleSyntheticGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v1/synthetics/tests/{s}", .{id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleSignalGet(
@@ -390,12 +329,8 @@ pub fn handleSignalGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/security_monitoring/signals/{s}", .{id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleFindingGet(
@@ -413,12 +348,8 @@ pub fn handleFindingGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/security/findings/{s}", .{id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handlePipelineEventGet(
@@ -436,12 +367,8 @@ pub fn handlePipelineEventGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/ci/pipelines/events/{s}", .{id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleTestEventGet(
@@ -459,18 +386,11 @@ pub fn handleTestEventGet(
     };
 
     const path = try std.fmt.allocPrint(arena_alloc, "/api/v2/ci/tests/events/{s}", .{id});
-    const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, &.{});
+    try common.writeOutput(ctx.io, response);
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test {
-    std.testing.refAllDecls(@This());
-}

@@ -14,6 +14,7 @@ pub const AuthType = enum {
 
 pub const Context = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     dd_domain: []const u8,
     dd_domain_owned: ?[]const u8,
     auth_type: AuthType,
@@ -233,23 +234,35 @@ pub fn parseTimeArg(allocator: std.mem.Allocator, arg: ?[]const u8, current_time
 // Configuration Helpers
 // ============================================================================
 
+/// Environment variables read by main() from std.process.Init.environ_map.
+/// All fields are borrowed slices — initConfig dupes the ones it stores.
+pub const EnvVars = struct {
+    dd_site: ?[]const u8 = null,
+    access_token: ?[]const u8 = null,
+    api_key: ?[]const u8 = null,
+    app_key: ?[]const u8 = null,
+};
+
 /// Initialize context from environment and CLI args
 pub fn initConfig(
+    io: std.Io,
     allocator: std.mem.Allocator,
     domain_arg: ?[]const u8,
     from_arg: ?[]const u8,
     to_arg: ?[]const u8,
     verbose: bool,
+    env: EnvVars,
 ) !Context {
     var ctx: Context = undefined;
     ctx.allocator = allocator;
+    ctx.io = io;
     ctx.dd_domain_owned = null;
     ctx.verbose = verbose;
     ctx.from_explicit = from_arg != null;
     ctx.to_explicit = to_arg != null;
 
     // Get current time for relative time calculations
-    const current_time = std.time.timestamp();
+    const current_time = std.Io.Clock.real.now(io).toSeconds();
 
     // Parse time arguments (handles both relative and absolute)
     const from_timestamp = try parseTimeArg(allocator, from_arg, current_time, true);
@@ -266,10 +279,11 @@ pub fn initConfig(
         if (domain_arg) |domain| {
             break :blk domain;
         }
-        if (std.process.getEnvVarOwned(allocator, "DD_SITE")) |site| {
-            ctx.dd_domain_owned = site;
-            break :blk site;
-        } else |_| {
+        if (env.dd_site) |site| {
+            const owned = try allocator.dupe(u8, site);
+            ctx.dd_domain_owned = owned;
+            break :blk owned;
+        } else {
             break :blk "datadoghq.com";
         }
     };
@@ -277,9 +291,6 @@ pub fn initConfig(
 
     // Validate domain
     if (!isValidDatadogDomain(ctx.dd_domain)) {
-        if (ctx.dd_domain_owned) |domain| allocator.free(domain);
-        if (ctx.from_timestamp) |ts| allocator.free(ts);
-        if (ctx.to_timestamp) |ts| allocator.free(ts);
         std.debug.print("Error: Invalid Datadog domain: {s}\n", .{ctx.dd_domain});
         std.debug.print("Valid domains should end with 'datadoghq.com', 'datadoghq.eu', or similar\n", .{});
         return error.InvalidDomain;
@@ -288,16 +299,16 @@ pub fn initConfig(
     // Auth priority: DD_ACCESS_TOKEN env > stored token file > DD_API_KEY + DD_APPLICATION_KEY
 
     // 1. Check DD_ACCESS_TOKEN env var
-    if (std.process.getEnvVarOwned(allocator, "DD_ACCESS_TOKEN")) |token| {
+    if (env.access_token) |token| {
         ctx.auth_type = .bearer;
-        ctx.access_token = token;
+        ctx.access_token = try allocator.dupe(u8, token);
         ctx.api_key = "";
         ctx.app_key = "";
         return ctx;
-    } else |_| {}
+    }
 
     // 2. Try stored OAuth2 token from disk (with auto-refresh)
-    if (try auth.loadStoredToken(allocator, ctx.dd_domain)) |token| {
+    if (try auth.loadStoredToken(io, allocator)) |token| {
         ctx.auth_type = .bearer;
         ctx.access_token = token;
         ctx.api_key = "";
@@ -306,20 +317,20 @@ pub fn initConfig(
     }
 
     // 3. Fall back to API key + application key
-    ctx.api_key = std.process.getEnvVarOwned(allocator, "DD_API_KEY") catch {
+    ctx.api_key = if (env.api_key) |v| try allocator.dupe(u8, v) else {
         std.debug.print("Error: No authentication available.\n", .{});
         std.debug.print("Options:\n", .{});
-        std.debug.print("  - Run 'dd-cli auth login' to authenticate with OAuth2\n", .{});
+        std.debug.print("  - Place a bearer token at ~/.config/dd-cli/token.json\n", .{});
         std.debug.print("  - Set DD_ACCESS_TOKEN environment variable\n", .{});
         std.debug.print("  - Set DD_API_KEY and DD_APPLICATION_KEY environment variables\n", .{});
         return error.EnvironmentVariableNotFound;
     };
+    errdefer allocator.free(ctx.api_key);
 
-    ctx.app_key = std.process.getEnvVarOwned(allocator, "DD_APPLICATION_KEY") catch |err| {
-        allocator.free(ctx.api_key);
+    ctx.app_key = if (env.app_key) |v| try allocator.dupe(u8, v) else {
         std.debug.print("Error: DD_APPLICATION_KEY environment variable not set\n", .{});
         std.debug.print("Required when using API key authentication\n", .{});
-        return err;
+        return error.EnvironmentVariableMissing;
     };
 
     ctx.auth_type = .api_key;
@@ -363,7 +374,9 @@ pub fn urlEncode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
         if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~') {
             try result.append(allocator, byte);
         } else {
-            try result.writer(allocator).print("%{X:0>2}", .{byte});
+            var buf: [3]u8 = undefined;
+            const encoded = try std.fmt.bufPrint(&buf, "%{X:0>2}", .{byte});
+            try result.appendSlice(allocator, encoded);
         }
     }
 
@@ -400,7 +413,9 @@ pub fn buildUrl(
                 defer allocator.free(encoded_key);
                 const encoded_value = try urlEncode(allocator, param.value);
                 defer allocator.free(encoded_value);
-                try query_buf.writer(allocator).print("{s}={s}", .{ encoded_key, encoded_value });
+                const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ encoded_key, encoded_value });
+                defer allocator.free(kv);
+                try query_buf.appendSlice(allocator, kv);
             }
 
             query_string = try query_buf.toOwnedSlice(allocator);
@@ -527,6 +542,7 @@ pub fn parseHttpMethod(method_str: []const u8) !std.http.Method {
 
 /// Execute HTTP request
 pub fn executeRequest(
+    io: std.Io,
     allocator: std.mem.Allocator,
     method: std.http.Method,
     url: []const u8,
@@ -535,6 +551,7 @@ pub fn executeRequest(
 ) ![]const u8 {
     var client: std.http.Client = .{
         .allocator = allocator,
+        .io = io,
     };
     defer client.deinit();
 
@@ -560,6 +577,143 @@ pub fn executeRequest(
     }
 
     return try allocator.dupe(u8, body_writer.written());
+}
+
+/// Shared pagination loop for all POST-based streaming search endpoints.
+///
+/// `ctx` must be a value (not pointer) of a type that has:
+///   fn buildBody(self: @TypeOf(ctx), arena_alloc: std.mem.Allocator, cursor: ?[]const u8) ![]const u8
+///
+/// The function posts to `url_base`, parses the `data` array from each
+/// response, calls `writeLogLine` for each item, and advances via the
+/// `meta.page.after` cursor until exhausted or `limit` is reached.
+pub fn runPaginatedStream(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    url_base: []const u8,
+    headers: []const std.http.Header,
+    limit: ?usize,
+    auto_paginate: bool,
+    comptime label: []const u8,
+    ctx: anytype,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var total_output: usize = 0;
+    var cursor: ?[]const u8 = null;
+    defer if (cursor) |c| allocator.free(c);
+    var page_num: usize = 1;
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    while (true) {
+        if (limit) |max| {
+            if (total_output >= max) break;
+        }
+
+        const body = try ctx.buildBody(arena.allocator(), cursor);
+
+        var body_writer = std.Io.Writer.Allocating.init(allocator);
+        defer body_writer.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url_base },
+            .method = .POST,
+            .extra_headers = headers,
+            .response_writer = &body_writer.writer,
+            .payload = body,
+        }) catch |err| {
+            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
+            std.debug.print("Successfully retrieved {d} " ++ label ++ " before failure.\n", .{total_output});
+            std.debug.print("Network error: {}\n", .{err});
+            return err;
+        };
+
+        if (result.status != .ok) {
+            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
+            const response_body = body_writer.written();
+            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
+                std.debug.print("Response: {s}\n", .{response_body});
+            }
+            if (result.status == .too_many_requests) {
+                std.debug.print("Successfully retrieved {d} " ++ label ++ " before rate limit.\n", .{total_output});
+                std.debug.print("Consider reducing --limit or narrowing the query to reduce data volume.\n", .{});
+            } else if (page_num > 1) {
+                std.debug.print("Successfully retrieved {d} " ++ label ++ " before failure.\n", .{total_output});
+            }
+            return error.RequestFailed;
+        }
+
+        const response_body = body_writer.written();
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            arena.allocator(),
+            response_body,
+            .{},
+        ) catch |err| {
+            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
+            std.debug.print("Successfully retrieved {d} " ++ label ++ " before failure.\n", .{total_output});
+            return err;
+        };
+
+        const data_array = if (parsed.value.object.get("data")) |data|
+            if (data == .array) data.array else return error.InvalidResponse
+        else
+            return error.InvalidResponse;
+
+        for (data_array.items) |item| {
+            if (limit) |max| {
+                if (total_output >= max) break;
+            }
+            try writeLogLine(io, allocator, item);
+            total_output += 1;
+        }
+
+        if (!auto_paginate) {
+            parsed.deinit();
+            break;
+        }
+
+        const next_cursor = if (parsed.value.object.get("meta")) |meta|
+            if (meta.object.get("page")) |page_meta|
+                if (page_meta.object.get("after")) |after|
+                    if (after == .string) after.string else null
+                else
+                    null
+            else
+                null
+        else
+            null;
+
+        if (next_cursor == null) {
+            parsed.deinit();
+            break;
+        }
+
+        if (cursor) |old_cursor| allocator.free(old_cursor);
+        cursor = try allocator.dupe(u8, next_cursor.?);
+        page_num += 1;
+        parsed.deinit();
+        _ = arena.reset(.retain_capacity);
+    }
+}
+
+/// Execute a GET request and return the response body.
+/// Builds headers (respecting auth type), builds the URL, prints it if
+/// verbose, then calls executeRequest. The returned slice is allocated from
+/// `arena_alloc` via executeRequest.
+pub fn getJson(
+    ctx: *const Context,
+    arena_alloc: std.mem.Allocator,
+    path: []const u8,
+    query_params: []const QueryParam,
+) ![]const u8 {
+    const headers = try buildHeaders(arena_alloc, ctx, &.{});
+    const url = try buildUrl(arena_alloc, ctx.dd_domain, path, query_params);
+    if (ctx.verbose) std.debug.print("{s}\n", .{url});
+    return executeRequest(ctx.io, arena_alloc, .GET, url, headers, null);
 }
 
 // ============================================================================
@@ -673,10 +827,10 @@ pub fn buildQueryParamsWithUnixTimestamps(
 
 /// Write response to stdout with newline
 /// Uses unbuffered writes to avoid buffer size limitations
-pub fn writeOutput(response: []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(response);
-    try stdout.writeAll("\n");
+pub fn writeOutput(io: std.Io, response: []const u8) !void {
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(io, response);
+    try stdout.writeStreamingAll(io, "\n");
 }
 
 // Datadog Logs API constants
@@ -698,7 +852,9 @@ pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
             '\x08' => try result.appendSlice(allocator, "\\b"),
             '\x0C' => try result.appendSlice(allocator, "\\f"),
             0x00...0x07, 0x0B, 0x0E...0x1F => {
-                try result.writer(allocator).print("\\u{x:0>4}", .{c});
+                var buf: [7]u8 = undefined;
+                const encoded = try std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c});
+                try result.appendSlice(allocator, encoded);
             },
             else => try result.append(allocator, c),
         }
@@ -708,7 +864,7 @@ pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
 }
 
 /// Convert a std.json.Value to JSON string
-pub fn valueToJson(allocator: std.mem.Allocator, value: std.json.Value) error{OutOfMemory}![]const u8 {
+pub fn valueToJson(allocator: std.mem.Allocator, value: std.json.Value) (error{OutOfMemory} || std.fmt.BufPrintError)![]const u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
@@ -716,7 +872,7 @@ pub fn valueToJson(allocator: std.mem.Allocator, value: std.json.Value) error{Ou
     return result.toOwnedSlice(allocator);
 }
 
-fn valueToJsonWriter(allocator: std.mem.Allocator, value: std.json.Value, list: *std.ArrayList(u8)) error{OutOfMemory}!void {
+fn valueToJsonWriter(allocator: std.mem.Allocator, value: std.json.Value, list: *std.ArrayList(u8)) (error{OutOfMemory} || std.fmt.BufPrintError)!void {
     switch (value) {
         .null => try list.appendSlice(allocator, "null"),
         .bool => |b| try list.appendSlice(allocator, if (b) "true" else "false"),
@@ -766,13 +922,13 @@ fn valueToJsonWriter(allocator: std.mem.Allocator, value: std.json.Value, list: 
 }
 
 /// Write a single log line as JSON to stdout with immediate flush
-pub fn writeLogLine(allocator: std.mem.Allocator, log_value: std.json.Value) !void {
+pub fn writeLogLine(io: std.Io, allocator: std.mem.Allocator, log_value: std.json.Value) !void {
     const json_str = try valueToJson(allocator, log_value);
     defer allocator.free(json_str);
 
-    const stdout_file = std.fs.File.stdout();
-    try stdout_file.writeAll(json_str);
-    try stdout_file.writeAll("\n");
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(io, json_str);
+    try stdout.writeStreamingAll(io, "\n");
 }
 
 // ============================================================================
@@ -806,6 +962,7 @@ fn buildEventsSearchRequest(
 
 /// Stream events with automatic pagination
 pub fn streamEventsSearch(
+    io: std.Io,
     allocator: std.mem.Allocator,
     url_base: []const u8,
     headers: []const std.http.Header,
@@ -814,139 +971,36 @@ pub fn streamEventsSearch(
     query: ?[]const u8,
     page_limit: i64,
     sort: ?[]const u8,
-    limit: ?usize, // null = unlimited
+    limit: ?usize,
     auto_paginate: bool,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+    const Ctx = struct {
+        from_timestamp: ?[]const u8,
+        to_timestamp: ?[]const u8,
+        query: ?[]const u8,
+        page_limit: i64,
+        sort: ?[]const u8,
 
-    var total_output: usize = 0;
-    var cursor: ?[]const u8 = null;
-    defer if (cursor) |c| allocator.free(c); // Free cursor at end of function
-    var page_num: usize = 1;
-
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    while (true) {
-        // Check if we've hit the limit
-        if (limit) |max| {
-            if (total_output >= max) break;
+        fn buildBody(self: @This(), arena_alloc: std.mem.Allocator, cursor: ?[]const u8) ![]const u8 {
+            const request = buildEventsSearchRequest(
+                self.from_timestamp,
+                self.to_timestamp,
+                self.query,
+                cursor,
+                self.page_limit,
+                self.sort,
+            );
+            return std.fmt.allocPrint(arena_alloc, "{f}", .{std.json.fmt(request, .{ .emit_null_optional_fields = false })});
         }
+    };
 
-        // Build request using generated types
-        const request = buildEventsSearchRequest(
-            from_timestamp,
-            to_timestamp,
-            query,
-            cursor,
-            page_limit,
-            sort,
-        );
-
-        // Serialize to JSON using fmt
-        const body = try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(request, .{ .emit_null_optional_fields = false })});
-
-        // Use outer allocator for body_writer so it survives arena reset
-        var body_writer = std.Io.Writer.Allocating.init(allocator);
-        defer body_writer.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url_base },
-            .method = .POST,
-            .extra_headers = headers,
-            .response_writer = &body_writer.writer,
-            .payload = body,
-        }) catch |err| {
-            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} events before failure.\n", .{total_output});
-            std.debug.print("Network error: {}\n", .{err});
-            return err;
-        };
-
-        // Check response status
-        if (result.status != .ok) {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-            if (result.status == .too_many_requests) {
-                std.debug.print("Successfully retrieved {d} events before rate limit.\n", .{total_output});
-                std.debug.print("Consider reducing --limit or narrowing --query to reduce data volume.\n", .{});
-            } else if (page_num > 1) {
-                std.debug.print("Successfully retrieved {d} events before failure.\n", .{total_output});
-            }
-            return error.RequestFailed;
-        }
-
-        // Parse response
-        const response_body = body_writer.written();
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            arena.allocator(),
-            response_body,
-            .{},
-        ) catch |err| {
-            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} events before failure.\n", .{total_output});
-            return err;
-        };
-
-        // Extract data array
-        const data_array = if (parsed.value.object.get("data")) |data|
-            if (data == .array) data.array else return error.InvalidResponse
-        else
-            return error.InvalidResponse;
-
-        // Stream each event
-        for (data_array.items) |event| {
-            // Check limit before output
-            if (limit) |max| {
-                if (total_output >= max) break;
-            }
-
-            try writeLogLine(allocator, event);
-            total_output += 1;
-        }
-
-        // Check if we should continue pagination
-        if (!auto_paginate) {
-            parsed.deinit();
-            break; // Single page mode
-        }
-
-        // Extract next cursor
-        const next_cursor = if (parsed.value.object.get("meta")) |meta|
-            if (meta.object.get("page")) |page_meta|
-                if (page_meta.object.get("after")) |after|
-                    if (after == .string) after.string else null
-                else
-                    null
-            else
-                null
-        else
-            null;
-
-        // Stop if no more pages
-        if (next_cursor == null) {
-            parsed.deinit();
-            break;
-        }
-
-        // Update cursor for next iteration
-        // Free old cursor before allocating new one (escaping arena memory)
-        if (cursor) |old_cursor| allocator.free(old_cursor);
-        cursor = try allocator.dupe(u8, next_cursor.?);
-
-        page_num += 1;
-
-        // Clean up parsed data before resetting arena
-        parsed.deinit();
-
-        // Reset arena for next iteration
-        _ = arena.reset(.retain_capacity);
-    }
+    return runPaginatedStream(io, allocator, url_base, headers, limit, auto_paginate, "events", Ctx{
+        .from_timestamp = from_timestamp,
+        .to_timestamp = to_timestamp,
+        .query = query,
+        .page_limit = page_limit,
+        .sort = sort,
+    });
 }
 
 /// Build query string combining FILTER with service/operation/resource filters
@@ -1132,6 +1186,7 @@ test "buildUrl - query keys are encoded" {
 test "buildQueryParams - includes date range" {
     const config = Context{
         .allocator = std.testing.allocator,
+        .io = std.Io.failing,
         .dd_domain = "datadoghq.com",
         .dd_domain_owned = null,
         .auth_type = .api_key,
@@ -1165,6 +1220,7 @@ test "buildQueryParams - includes date range" {
 test "buildQueryParams - no date range" {
     const config = Context{
         .allocator = std.testing.allocator,
+        .io = std.Io.failing,
         .dd_domain = "datadoghq.com",
         .dd_domain_owned = null,
         .auth_type = .api_key,
@@ -1356,4 +1412,186 @@ test "parseTimeArg - now keyword for to parameter" {
 
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("2024-01-01T00:00:00Z", result.?);
+}
+
+test "buildHeaders - api_key auth produces correct headers" {
+    const ctx = Context{
+        .allocator = std.testing.allocator,
+        .io = std.Io.failing,
+        .dd_domain = "datadoghq.com",
+        .dd_domain_owned = null,
+        .auth_type = .api_key,
+        .api_key = "myapikey",
+        .app_key = "myappkey",
+        .access_token = null,
+        .from_timestamp = null,
+        .to_timestamp = null,
+        .verbose = false,
+        .from_explicit = false,
+        .to_explicit = false,
+    };
+    const headers = try buildHeaders(std.testing.allocator, &ctx, &.{});
+    defer std.testing.allocator.free(headers);
+
+    try std.testing.expectEqual(@as(usize, 3), headers.len);
+    try std.testing.expectEqualStrings("DD-API-KEY", headers[0].name);
+    try std.testing.expectEqualStrings("myapikey", headers[0].value);
+    try std.testing.expectEqualStrings("DD-APPLICATION-KEY", headers[1].name);
+    try std.testing.expectEqualStrings("myappkey", headers[1].value);
+    try std.testing.expectEqualStrings("Accept", headers[2].name);
+    try std.testing.expectEqualStrings("application/json", headers[2].value);
+}
+
+test "buildHeaders - bearer auth produces Authorization header" {
+    const ctx = Context{
+        .allocator = std.testing.allocator,
+        .io = std.Io.failing,
+        .dd_domain = "datadoghq.com",
+        .dd_domain_owned = null,
+        .auth_type = .bearer,
+        .api_key = "",
+        .app_key = "",
+        .access_token = "tok123",
+        .from_timestamp = null,
+        .to_timestamp = null,
+        .verbose = false,
+        .from_explicit = false,
+        .to_explicit = false,
+    };
+    const headers = try buildHeaders(std.testing.allocator, &ctx, &.{});
+    defer {
+        // bearer_value ("Bearer tok123") is also allocated from the passed allocator
+        std.testing.allocator.free(headers[0].value);
+        std.testing.allocator.free(headers);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), headers.len);
+    try std.testing.expectEqualStrings("Authorization", headers[0].name);
+    try std.testing.expectEqualStrings("Bearer tok123", headers[0].value);
+    try std.testing.expectEqualStrings("Accept", headers[1].name);
+}
+
+test "buildHeaders - custom headers are appended" {
+    const ctx = Context{
+        .allocator = std.testing.allocator,
+        .io = std.Io.failing,
+        .dd_domain = "datadoghq.com",
+        .dd_domain_owned = null,
+        .auth_type = .api_key,
+        .api_key = "k",
+        .app_key = "a",
+        .access_token = null,
+        .from_timestamp = null,
+        .to_timestamp = null,
+        .verbose = false,
+        .from_explicit = false,
+        .to_explicit = false,
+    };
+    const custom = [_]CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+    };
+    const headers = try buildHeaders(std.testing.allocator, &ctx, &custom);
+    defer std.testing.allocator.free(headers);
+
+    try std.testing.expectEqual(@as(usize, 4), headers.len);
+    try std.testing.expectEqualStrings("Content-Type", headers[3].name);
+    try std.testing.expectEqualStrings("application/json", headers[3].value);
+}
+
+test "parseIso8601ToUnix - known epoch boundary" {
+    // 1970-01-01T00:00:00Z = Unix epoch 0
+    try std.testing.expectEqual(@as(i64, 0), try parseIso8601ToUnix("1970-01-01T00:00:00Z"));
+}
+
+test "parseIso8601ToUnix - known timestamp" {
+    // 2024-01-01T00:00:00Z = 1704067200
+    try std.testing.expectEqual(@as(i64, 1704067200), try parseIso8601ToUnix("2024-01-01T00:00:00Z"));
+}
+
+test "parseIso8601ToUnix - leap year day is valid" {
+    // 2024-02-29 exists (2024 is a leap year); 2024-01-01=1704067200 + 31+28 days
+    try std.testing.expectEqual(@as(i64, 1709164800), try parseIso8601ToUnix("2024-02-29T00:00:00Z"));
+}
+
+test "parseIso8601ToUnix - time components" {
+    // 2024-01-01T12:30:45Z
+    const expected: i64 = 1704067200 + 12 * 3600 + 30 * 60 + 45;
+    try std.testing.expectEqual(expected, try parseIso8601ToUnix("2024-01-01T12:30:45Z"));
+}
+
+test "parseIso8601ToUnix - rejects too-short string" {
+    try std.testing.expectError(error.InvalidTimestamp, parseIso8601ToUnix("2024-01"));
+}
+
+test "initConfig - bearer auth from access_token env" {
+    // Explicit time args bypass the clock call in parseTimeArg, so std.Io.failing is safe.
+    const ctx = try initConfig(
+        std.Io.failing,
+        std.testing.allocator,
+        null,
+        "2024-01-01T00:00:00Z",
+        "2024-01-01T01:00:00Z",
+        false,
+        .{ .access_token = "tok123" },
+    );
+    defer {
+        if (ctx.from_timestamp) |t| std.testing.allocator.free(t);
+        if (ctx.to_timestamp) |t| std.testing.allocator.free(t);
+        if (ctx.access_token) |t| std.testing.allocator.free(t);
+    }
+    try std.testing.expectEqual(AuthType.bearer, ctx.auth_type);
+    try std.testing.expectEqualStrings("tok123", ctx.access_token.?);
+}
+
+test "initConfig - access_token takes priority over api_key" {
+    const ctx = try initConfig(
+        std.Io.failing,
+        std.testing.allocator,
+        null,
+        "2024-01-01T00:00:00Z",
+        "2024-01-01T01:00:00Z",
+        false,
+        .{ .access_token = "tok", .api_key = "key", .app_key = "app" },
+    );
+    defer {
+        if (ctx.from_timestamp) |t| std.testing.allocator.free(t);
+        if (ctx.to_timestamp) |t| std.testing.allocator.free(t);
+        if (ctx.access_token) |t| std.testing.allocator.free(t);
+    }
+    try std.testing.expectEqual(AuthType.bearer, ctx.auth_type);
+    try std.testing.expectEqualStrings("tok", ctx.access_token.?);
+}
+
+test "initConfig - domain from env" {
+    // Explicit time args bypass the clock call in parseTimeArg, so std.Io.failing is safe.
+    const ctx = try initConfig(
+        std.Io.failing,
+        std.testing.allocator,
+        null,
+        "2024-01-01T00:00:00Z",
+        "2024-01-01T01:00:00Z",
+        false,
+        .{ .dd_site = "datadoghq.eu", .access_token = "tok" },
+    );
+    defer {
+        if (ctx.from_timestamp) |t| std.testing.allocator.free(t);
+        if (ctx.to_timestamp) |t| std.testing.allocator.free(t);
+        if (ctx.dd_domain_owned) |d| std.testing.allocator.free(d);
+        if (ctx.access_token) |t| std.testing.allocator.free(t);
+    }
+    try std.testing.expectEqualStrings("datadoghq.eu", ctx.dd_domain);
+}
+
+test "initConfig - invalid domain returns error" {
+    // Domain validation fails before auth; explicit time args avoid the clock call.
+    const result = initConfig(
+        std.Io.failing,
+        std.testing.allocator,
+        "notadatadogdomain.example.com",
+        "2024-01-01T00:00:00Z",
+        "2024-01-01T01:00:00Z",
+        false,
+        .{ .access_token = "tok" },
+    );
+    try std.testing.expectError(error.InvalidDomain, result);
 }

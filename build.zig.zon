@@ -25,7 +25,7 @@
     .fingerprint = 0x6accaab87a4b566a, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -33,12 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .yazap = .{
-            .url = "git+https://github.com/PrajwalCH/yazap/#a85c65beefe911db5fc17bc90e756738d742dc63",
-            .hash = "yazap-0.6.3-Z1t-EmrzAQA-8vFR-JGpI7vCSpHv5_6z6PAIDq2X4PoH",
-        },
-        .oauth2 = .{
-            .url = "https://github.com/ibd1279/oauth2/archive/refs/tags/v0.tar.gz",
-            .hash = "oauth2-0.0.0-lo2ivLx7DQBd_uFCK2QRdu8itRwMKUCzDyUNMl_1uKz8",
+            .url = "git+https://github.com/PrajwalCH/yazap/?ref=HEAD#82edda4aa180cc3aebf00b2c39a37975969eba0a",
+            .hash = "yazap-0.7.0-Z1t-EiT6AQDpbgaDQ1i_oBfnvmeH4AUM3WmiuTuXuQMN",
         },
     },
     .paths = .{

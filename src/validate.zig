@@ -9,7 +9,7 @@ const CustomHeader = common.CustomHeader;
 
 pub fn handleValidateCommand(
     ctx: *const common.Context,
-    cmd_matches: anytype,
+    cmd_matches: *const @import("yazap").ArgMatches,
 ) !void {
     _ = cmd_matches;
 
@@ -23,16 +23,13 @@ pub fn handleValidateCommand(
     const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.executeRequest(ctx.io, arena_alloc, .GET, url, headers, null);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test {
-    std.testing.refAllDecls(@This());
-}

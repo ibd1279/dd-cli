@@ -41,6 +41,7 @@ fn buildLogsSearchRequest(
 
 /// Stream logs with automatic pagination
 fn streamLogsSearch(
+    io: std.Io,
     allocator: std.mem.Allocator,
     url_base: []const u8,
     headers: []const std.http.Header,
@@ -50,140 +51,39 @@ fn streamLogsSearch(
     indexes: []const []const u8,
     page_limit: i64,
     sort: ?[]const u8,
-    limit: ?usize, // null = unlimited
+    limit: ?usize,
     auto_paginate: bool,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+    const Ctx = struct {
+        from_timestamp: ?[]const u8,
+        to_timestamp: ?[]const u8,
+        query: []const u8,
+        indexes: []const []const u8,
+        page_limit: i64,
+        sort: ?[]const u8,
 
-    var total_output: usize = 0;
-    var cursor: ?[]const u8 = null;
-    defer if (cursor) |c| allocator.free(c); // Free cursor at end of function
-    var page_num: usize = 1;
-
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    while (true) {
-        // Check if we've hit the limit
-        if (limit) |max| {
-            if (total_output >= max) break;
+        pub fn buildBody(self: @This(), arena_alloc: std.mem.Allocator, cursor: ?[]const u8) ![]const u8 {
+            const request = buildLogsSearchRequest(
+                self.from_timestamp,
+                self.to_timestamp,
+                self.query,
+                self.indexes,
+                cursor,
+                self.page_limit,
+                self.sort,
+            );
+            return std.fmt.allocPrint(arena_alloc, "{f}", .{std.json.fmt(request, .{ .emit_null_optional_fields = false })});
         }
+    };
 
-        // Build request using generated types
-        const request = buildLogsSearchRequest(
-            from_timestamp,
-            to_timestamp,
-            query,
-            indexes,
-            cursor,
-            page_limit,
-            sort,
-        );
-
-        // Serialize to JSON using fmt
-        const body = try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(request, .{ .emit_null_optional_fields = false })});
-
-        // Use outer allocator for body_writer so it survives arena reset
-        var body_writer = std.Io.Writer.Allocating.init(allocator);
-        defer body_writer.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url_base },
-            .method = .POST,
-            .extra_headers = headers,
-            .response_writer = &body_writer.writer,
-            .payload = body,
-        }) catch |err| {
-            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} logs before failure.\n", .{total_output});
-            std.debug.print("Network error: {}\n", .{err});
-            return err;
-        };
-
-        // Check response status
-        if (result.status != .ok) {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-            if (result.status == .too_many_requests) {
-                std.debug.print("Successfully retrieved {d} logs before rate limit.\n", .{total_output});
-                std.debug.print("Consider reducing --limit or narrowing --query to reduce data volume.\n", .{});
-            } else if (page_num > 1) {
-                std.debug.print("Successfully retrieved {d} logs before failure.\n", .{total_output});
-            }
-            return error.RequestFailed;
-        }
-
-        // Parse response
-        const response_body = body_writer.written();
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            arena.allocator(),
-            response_body,
-            .{},
-        ) catch |err| {
-            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} logs before failure.\n", .{total_output});
-            return err;
-        };
-
-        // Extract data array
-        const data_array = if (parsed.value.object.get("data")) |data|
-            if (data == .array) data.array else return error.InvalidResponse
-        else
-            return error.InvalidResponse;
-
-        // Stream each log
-        for (data_array.items) |log| {
-            // Check limit before output
-            if (limit) |max| {
-                if (total_output >= max) break;
-            }
-
-            try common.writeLogLine(allocator, log);
-            total_output += 1;
-        }
-
-        // Check if we should continue pagination
-        if (!auto_paginate) {
-            parsed.deinit();
-            break; // Single page mode
-        }
-
-        // Extract next cursor
-        const next_cursor = if (parsed.value.object.get("meta")) |meta|
-            if (meta.object.get("page")) |page_meta|
-                if (page_meta.object.get("after")) |after|
-                    if (after == .string) after.string else null
-                else
-                    null
-            else
-                null
-        else
-            null;
-
-        // Stop if no more pages
-        if (next_cursor == null) {
-            parsed.deinit();
-            break;
-        }
-
-        // Update cursor for next iteration
-        // Free old cursor before allocating new one (escaping arena memory)
-        if (cursor) |old_cursor| allocator.free(old_cursor);
-        cursor = try allocator.dupe(u8, next_cursor.?);
-
-        page_num += 1;
-
-        // Clean up parsed data before resetting arena
-        parsed.deinit();
-
-        // Reset arena for next iteration
-        _ = arena.reset(.retain_capacity);
-    }
+    return common.runPaginatedStream(io, allocator, url_base, headers, limit, auto_paginate, "logs", Ctx{
+        .from_timestamp = from_timestamp,
+        .to_timestamp = to_timestamp,
+        .query = query,
+        .indexes = indexes,
+        .page_limit = page_limit,
+        .sort = sort,
+    });
 }
 
 // ============================================================================
@@ -192,6 +92,7 @@ fn streamLogsSearch(
 
 /// Stream spans with automatic pagination
 fn streamSpansSearch(
+    io: std.Io,
     allocator: std.mem.Allocator,
     url_base: []const u8,
     headers: []const std.http.Header,
@@ -203,180 +104,64 @@ fn streamSpansSearch(
     limit: ?usize,
     auto_paginate: bool,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+    const Ctx = struct {
+        from_timestamp: ?[]const u8,
+        to_timestamp: ?[]const u8,
+        query: []const u8,
+        page_limit: i64,
+        sort: ?[]const u8,
 
-    var total_output: usize = 0;
-    var cursor: ?[]const u8 = null;
-    defer if (cursor) |c| allocator.free(c);
-    var page_num: usize = 1;
+        pub fn buildBody(self: @This(), arena_alloc: std.mem.Allocator, cursor: ?[]const u8) ![]const u8 {
+            const escaped_query = try common.jsonEscape(arena_alloc, self.query);
+            const from_json = if (self.from_timestamp) |from| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, from);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "null");
+            const to_json = if (self.to_timestamp) |to| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, to);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "null");
+            const cursor_json = if (cursor) |c| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, c);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "null");
+            const sort_json = if (self.sort) |s| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, s);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "\"-timestamp\"");
 
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    while (true) {
-        // Check if we've hit the limit
-        if (limit) |max| {
-            if (total_output >= max) break;
+            return std.fmt.allocPrint(
+                arena_alloc,
+                \\{{
+                \\  "data": {{
+                \\    "attributes": {{
+                \\      "filter": {{
+                \\        "from": {s},
+                \\        "to": {s},
+                \\        "query": "{s}"
+                \\      }},
+                \\      "sort": {s},
+                \\      "page": {{
+                \\        "limit": {d},
+                \\        "cursor": {s}
+                \\      }}
+                \\    }},
+                \\    "type": "search_request"
+                \\  }}
+                \\}}
+                ,
+                .{ from_json, to_json, escaped_query, sort_json, self.page_limit, cursor_json },
+            );
         }
+    };
 
-        // Build request JSON
-        const escaped_query = try common.jsonEscape(arena.allocator(), query);
-        defer arena.allocator().free(escaped_query);
-
-        const from_json = if (from_timestamp) |from| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), from);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "null");
-
-        const to_json = if (to_timestamp) |to| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), to);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "null");
-
-        const cursor_json = if (cursor) |c| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), c);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "null");
-
-        const sort_json = if (sort) |s| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), s);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "\"-timestamp\"");
-
-        const body = try std.fmt.allocPrint(
-            arena.allocator(),
-            \\{{
-            \\  "data": {{
-            \\    "attributes": {{
-            \\      "filter": {{
-            \\        "from": {s},
-            \\        "to": {s},
-            \\        "query": "{s}"
-            \\      }},
-            \\      "sort": {s},
-            \\      "page": {{
-            \\        "limit": {d},
-            \\        "cursor": {s}
-            \\      }}
-            \\    }},
-            \\    "type": "search_request"
-            \\  }}
-            \\}}
-            ,
-            .{
-                from_json,
-                to_json,
-                escaped_query,
-                sort_json,
-                page_limit,
-                cursor_json,
-            },
-        );
-
-        // Execute request
-        var body_writer = std.Io.Writer.Allocating.init(allocator);
-        defer body_writer.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url_base },
-            .method = .POST,
-            .extra_headers = headers,
-            .response_writer = &body_writer.writer,
-            .payload = body,
-        }) catch |err| {
-            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} spans before failure.\n", .{total_output});
-            std.debug.print("Network error: {}\n", .{err});
-            return err;
-        };
-
-        // Check response status
-        if (result.status != .ok) {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-            if (result.status == .too_many_requests) {
-                std.debug.print("Successfully retrieved {d} spans before rate limit.\n", .{total_output});
-                std.debug.print("Consider reducing --limit or narrowing query.\n", .{});
-            } else if (page_num > 1) {
-                std.debug.print("Successfully retrieved {d} spans before failure.\n", .{total_output});
-            }
-            return error.RequestFailed;
-        }
-
-        // Parse response
-        const response_body = body_writer.written();
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            arena.allocator(),
-            response_body,
-            .{},
-        ) catch |err| {
-            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} spans before failure.\n", .{total_output});
-            return err;
-        };
-
-        // Extract data array
-        const data_array = if (parsed.value.object.get("data")) |data|
-            if (data == .array) data.array else return error.InvalidResponse
-        else
-            return error.InvalidResponse;
-
-        // Stream each span
-        for (data_array.items) |span| {
-            // Check limit before output
-            if (limit) |max| {
-                if (total_output >= max) break;
-            }
-
-            try common.writeLogLine(allocator, span);
-            total_output += 1;
-        }
-
-        // Check if we should continue pagination
-        if (!auto_paginate) {
-            parsed.deinit();
-            break;
-        }
-
-        // Extract next cursor
-        const next_cursor = if (parsed.value.object.get("meta")) |meta|
-            if (meta.object.get("page")) |page_meta|
-                if (page_meta.object.get("after")) |after|
-                    if (after == .string) after.string else null
-                else
-                    null
-            else
-                null
-        else
-            null;
-
-        // Stop if no more pages
-        if (next_cursor == null) {
-            parsed.deinit();
-            break;
-        }
-
-        // Update cursor for next iteration
-        if (cursor) |old_cursor| allocator.free(old_cursor);
-        cursor = try allocator.dupe(u8, next_cursor.?);
-
-        page_num += 1;
-
-        // Clean up parsed data before resetting arena
-        parsed.deinit();
-
-        // Reset arena for next iteration
-        _ = arena.reset(.retain_capacity);
-    }
+    return common.runPaginatedStream(io, allocator, url_base, headers, limit, auto_paginate, "spans", Ctx{
+        .from_timestamp = from_timestamp,
+        .to_timestamp = to_timestamp,
+        .query = query,
+        .page_limit = page_limit,
+        .sort = sort,
+    });
 }
 
 // ============================================================================
@@ -447,6 +232,7 @@ pub fn handleLogsSearch(
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     // Stream logs with pagination using API types
     try streamLogsSearch(
+        ctx.io,
         ctx.allocator,
         url,
         headers,
@@ -486,15 +272,10 @@ pub fn handleHostList(
         try params_list.append(arena_alloc, .{ .key = "from", .value = unix_str });
     }
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleMetricsList(
@@ -515,15 +296,10 @@ pub fn handleMetricsList(
         .{ .key = "q", .value = query },
     };
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, &query_params);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, &query_params);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleApisList(
@@ -555,15 +331,10 @@ pub fn handleApisList(
         try query_params.append(arena_alloc, .{ .key = "page[offset]", .value = offset_val });
     }
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, query_params.items);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, query_params.items);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleServicesList(
@@ -596,17 +367,11 @@ pub fn handleServicesList(
 
     // Build URL
     const path = "/api/v2/apm/services";
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params.items);
 
-    // Build headers
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    // Execute request
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, params.items);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleSpansSearch(
@@ -668,6 +433,7 @@ pub fn handleSpansSearch(
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     // Stream spans with pagination
     try streamSpansSearch(
+        ctx.io,
         ctx.allocator,
         url,
         headers,
@@ -733,6 +499,7 @@ pub fn handleEventsSearch(
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     // Stream events with pagination
     try common.streamEventsSearch(
+        ctx.io,
         ctx.allocator,
         url,
         headers,
@@ -773,15 +540,10 @@ pub fn handleMonitorsList(
         try extra_params_list.append(arena_alloc, .{ .key = "page_size", .value = l });
     }
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, extra_params_list.items);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, extra_params_list.items);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDowntimesList(
@@ -811,15 +573,10 @@ pub fn handleDowntimesList(
         try extra_params_list.append(arena_alloc, .{ .key = "page_size", .value = l });
     }
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, extra_params_list.items);
-
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, extra_params_list.items);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleContainersList(
@@ -852,13 +609,9 @@ pub fn handleContainersList(
     const query_params = try common.buildQueryParams(arena_alloc, ctx, params_list.items);
     defer arena_alloc.free(query_params);
 
-    // Execute request and output response
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, query_params);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, query_params);
 
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleProcessesList(
@@ -893,13 +646,9 @@ pub fn handleProcessesList(
 
     const query_params = try params_list.toOwnedSlice(arena_alloc);
 
-    // Execute request and output response
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, query_params);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.getJson(ctx, arena_alloc, path, query_params);
 
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 // ============================================================================
@@ -929,11 +678,8 @@ pub fn handleIncidentsList(
         if (ctx.to_timestamp) |to| try params_list.append(arena_alloc, .{ .key = "filter[created_at][end]", .value = to });
     }
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDashboardsList(
@@ -955,11 +701,8 @@ pub fn handleDashboardsList(
     if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[name]", .value = f });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "count", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleNotebooksList(
@@ -981,15 +724,13 @@ pub fn handleNotebooksList(
     if (filter) |f| try params_list.append(arena_alloc, .{ .key = "query", .value = f });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "count", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 /// Stream RUM events with automatic pagination (POST-based, same structure as spans)
 fn streamRumSearch(
+    io: std.Io,
     allocator: std.mem.Allocator,
     url_base: []const u8,
     headers: []const std.http.Header,
@@ -1001,157 +742,59 @@ fn streamRumSearch(
     limit: ?usize,
     auto_paginate: bool,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+    const Ctx = struct {
+        from_timestamp: ?[]const u8,
+        to_timestamp: ?[]const u8,
+        query: []const u8,
+        page_limit: i64,
+        sort: ?[]const u8,
 
-    var total_output: usize = 0;
-    var cursor: ?[]const u8 = null;
-    defer if (cursor) |c| allocator.free(c);
-    var page_num: usize = 1;
+        pub fn buildBody(self: @This(), arena_alloc: std.mem.Allocator, cursor: ?[]const u8) ![]const u8 {
+            const escaped_query = try common.jsonEscape(arena_alloc, self.query);
+            const from_json = if (self.from_timestamp) |from| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, from);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "null");
+            const to_json = if (self.to_timestamp) |to| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, to);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "null");
+            const cursor_json = if (cursor) |c| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, c);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "null");
+            const sort_json = if (self.sort) |s| blk: {
+                const escaped = try common.jsonEscape(arena_alloc, s);
+                break :blk try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+            } else try arena_alloc.dupe(u8, "\"-timestamp\"");
 
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    while (true) {
-        if (limit) |max| {
-            if (total_output >= max) break;
+            return std.fmt.allocPrint(
+                arena_alloc,
+                \\{{
+                \\  "filter": {{
+                \\    "from": {s},
+                \\    "to": {s},
+                \\    "query": "{s}"
+                \\  }},
+                \\  "sort": {s},
+                \\  "page": {{
+                \\    "limit": {d},
+                \\    "cursor": {s}
+                \\  }}
+                \\}}
+                ,
+                .{ from_json, to_json, escaped_query, sort_json, self.page_limit, cursor_json },
+            );
         }
+    };
 
-        const escaped_query = try common.jsonEscape(arena.allocator(), query);
-        defer arena.allocator().free(escaped_query);
-
-        const from_json = if (from_timestamp) |from| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), from);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "null");
-
-        const to_json = if (to_timestamp) |to| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), to);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "null");
-
-        const cursor_json = if (cursor) |c| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), c);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "null");
-
-        const sort_json = if (sort) |s| blk: {
-            const escaped = try common.jsonEscape(arena.allocator(), s);
-            defer arena.allocator().free(escaped);
-            break :blk try std.fmt.allocPrint(arena.allocator(), "\"{s}\"", .{escaped});
-        } else try arena.allocator().dupe(u8, "\"-timestamp\"");
-
-        const body = try std.fmt.allocPrint(
-            arena.allocator(),
-            \\{{
-            \\  "filter": {{
-            \\    "from": {s},
-            \\    "to": {s},
-            \\    "query": "{s}"
-            \\  }},
-            \\  "sort": {s},
-            \\  "page": {{
-            \\    "limit": {d},
-            \\    "cursor": {s}
-            \\  }}
-            \\}}
-            ,
-            .{
-                from_json,
-                to_json,
-                escaped_query,
-                sort_json,
-                page_limit,
-                cursor_json,
-            },
-        );
-
-        var body_writer = std.Io.Writer.Allocating.init(allocator);
-        defer body_writer.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url_base },
-            .method = .POST,
-            .extra_headers = headers,
-            .response_writer = &body_writer.writer,
-            .payload = body,
-        }) catch |err| {
-            std.debug.print("Error: Request failed on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} RUM events before failure.\n", .{total_output});
-            std.debug.print("Network error: {}\n", .{err});
-            return err;
-        };
-
-        if (result.status != .ok) {
-            std.debug.print("Error: HTTP request failed with status: {}\n", .{result.status});
-            const response_body = body_writer.written();
-            if (response_body.len > 0 and (response_body[0] == '{' or response_body[0] == '[')) {
-                std.debug.print("Response: {s}\n", .{response_body});
-            }
-            if (result.status == .too_many_requests) {
-                std.debug.print("Successfully retrieved {d} RUM events before rate limit.\n", .{total_output});
-                std.debug.print("Consider reducing --limit or narrowing query.\n", .{});
-            } else if (page_num > 1) {
-                std.debug.print("Successfully retrieved {d} RUM events before failure.\n", .{total_output});
-            }
-            return error.RequestFailed;
-        }
-
-        const response_body = body_writer.written();
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            arena.allocator(),
-            response_body,
-            .{},
-        ) catch |err| {
-            std.debug.print("Error: Failed to parse JSON response on page {d}\n", .{page_num});
-            std.debug.print("Successfully retrieved {d} RUM events before failure.\n", .{total_output});
-            return err;
-        };
-
-        const data_array = if (parsed.value.object.get("data")) |data|
-            if (data == .array) data.array else return error.InvalidResponse
-        else
-            return error.InvalidResponse;
-
-        for (data_array.items) |item| {
-            if (limit) |max| {
-                if (total_output >= max) break;
-            }
-            try common.writeLogLine(allocator, item);
-            total_output += 1;
-        }
-
-        if (!auto_paginate) {
-            parsed.deinit();
-            break;
-        }
-
-        const next_cursor = if (parsed.value.object.get("meta")) |meta|
-            if (meta.object.get("page")) |page_meta|
-                if (page_meta.object.get("after")) |after|
-                    if (after == .string) after.string else null
-                else
-                    null
-            else
-                null
-        else
-            null;
-
-        if (next_cursor == null) {
-            parsed.deinit();
-            break;
-        }
-
-        if (cursor) |old_cursor| allocator.free(old_cursor);
-        cursor = try allocator.dupe(u8, next_cursor.?);
-        page_num += 1;
-        parsed.deinit();
-        _ = arena.reset(.retain_capacity);
-    }
+    return common.runPaginatedStream(io, allocator, url_base, headers, limit, auto_paginate, "RUM events", Ctx{
+        .from_timestamp = from_timestamp,
+        .to_timestamp = to_timestamp,
+        .query = query,
+        .page_limit = page_limit,
+        .sort = sort,
+    });
 }
 
 pub fn handleRumSearch(
@@ -1211,6 +854,7 @@ pub fn handleRumSearch(
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
     try streamRumSearch(
+        ctx.io,
         ctx.allocator,
         url,
         headers,
@@ -1245,11 +889,8 @@ pub fn handleErrorsList(
     if (service) |s| try params_list.append(arena_alloc, .{ .key = "filter[service]", .value = s });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[limit]", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleSignalsList(
@@ -1306,8 +947,8 @@ pub fn handleSignalsList(
     });
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .POST, url, headers, body);
-    try common.writeOutput(response);
+    const response = try common.executeRequest(ctx.io, arena_alloc, .POST, url, headers, body);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleFindingsList(
@@ -1329,11 +970,8 @@ pub fn handleFindingsList(
     if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[tags]", .value = f });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[limit]", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handlePipelinesList(
@@ -1359,11 +997,8 @@ pub fn handlePipelinesList(
     if (ctx.from_timestamp) |from| try params_list.append(arena_alloc, .{ .key = "filter[from]", .value = from });
     if (ctx.to_timestamp) |to| try params_list.append(arena_alloc, .{ .key = "filter[to]", .value = to });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleTestsList(
@@ -1389,11 +1024,8 @@ pub fn handleTestsList(
     if (ctx.from_timestamp) |from| try params_list.append(arena_alloc, .{ .key = "filter[from]", .value = from });
     if (ctx.to_timestamp) |to| try params_list.append(arena_alloc, .{ .key = "filter[to]", .value = to });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleSyntheticsList(
@@ -1415,11 +1047,8 @@ pub fn handleSyntheticsList(
     if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[text]", .value = f });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page_size", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDevicesList(
@@ -1441,11 +1070,8 @@ pub fn handleDevicesList(
     if (filter) |f| try params_list.append(arena_alloc, .{ .key = "filter[query]", .value = f });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleCasesList(
@@ -1471,11 +1097,8 @@ pub fn handleCasesList(
     if (priority) |p| try params_list.append(arena_alloc, .{ .key = "filter[priority]", .value = p });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[size]", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleDependenciesList(
@@ -1497,20 +1120,14 @@ pub fn handleDependenciesList(
     if (service) |s| try params_list.append(arena_alloc, .{ .key = "filter[fromNode]", .value = s });
     if (limit) |l| try params_list.append(arena_alloc, .{ .key = "page[limit]", .value = l });
 
-    const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, params_list.items);
-    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
-    if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
-    try common.writeOutput(response);
+    const response = try common.getJson(ctx, arena_alloc, path, params_list.items);
+    try common.writeOutput(ctx.io, response);
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test {
-    std.testing.refAllDecls(@This());
-}
 
 test "buildLogsSearchRequest - basic request" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

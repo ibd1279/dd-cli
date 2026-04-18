@@ -528,7 +528,8 @@ pub fn handleLogsAggregate(
         }
         const escaped = try common.jsonEscape(arena_alloc, index);
         defer arena_alloc.free(escaped);
-        try indexes_json.writer(arena_alloc).print("\"{s}\"", .{escaped});
+        const quoted = try std.fmt.allocPrint(arena_alloc, "\"{s}\"", .{escaped});
+        try indexes_json.appendSlice(arena_alloc, quoted);
     }
     try indexes_json.append(arena_alloc, ']');
 
@@ -577,21 +578,18 @@ pub fn handleLogsAggregate(
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
     // Build headers
-    const base_count = 5;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
-    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
-    headers[4] = .{ .name = "Accept-Encoding", .value = "identity" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]common.CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
 
     // Execute request
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(ctx.allocator, std.http.Method.POST, url, headers, request_body);
+    const response = try common.executeRequest(ctx.io, ctx.allocator, std.http.Method.POST, url, headers, request_body);
     defer ctx.allocator.free(response);
 
     // Write output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 /// Handle aggregate metrics command - query timeseries data with MQL (V2 API)
@@ -690,19 +688,15 @@ pub fn handleMetricsAggregate(
 
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
-    // Build headers (need Content-Type for POST)
-    const base_count = 4;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
-    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]common.CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+    });
 
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .POST, url, headers, request_body);
+    const response = try common.executeRequest(ctx.io, arena_alloc, .POST, url, headers, request_body);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 /// Handle aggregate spans command
@@ -831,21 +825,18 @@ pub fn handleSpansAggregate(
     const url = try common.buildRawUrl(arena_alloc, ctx.dd_domain, path, null);
 
     // Build headers
-    const base_count = 5;
-    var headers = try arena_alloc.alloc(std.http.Header, base_count);
-    headers[0] = .{ .name = "DD-API-KEY", .value = ctx.api_key };
-    headers[1] = .{ .name = "DD-APPLICATION-KEY", .value = ctx.app_key };
-    headers[2] = .{ .name = "Accept", .value = "application/json" };
-    headers[3] = .{ .name = "Content-Type", .value = "application/json" };
-    headers[4] = .{ .name = "Accept-Encoding", .value = "identity" };
+    const headers = try common.buildHeaders(arena_alloc, ctx, &[_]common.CustomHeader{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+    });
 
     // Execute request
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(ctx.allocator, std.http.Method.POST, url, headers, request_body);
+    const response = try common.executeRequest(ctx.io, ctx.allocator, std.http.Method.POST, url, headers, request_body);
     defer ctx.allocator.free(response);
 
     // Write output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleNetworkConnectionsAggregate(
@@ -876,9 +867,9 @@ pub fn handleNetworkConnectionsAggregate(
     const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, query_params);
     const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.executeRequest(ctx.io, arena_alloc, .GET, url, headers, null);
 
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 pub fn handleNetworkDnsAggregate(
@@ -909,18 +900,15 @@ pub fn handleNetworkDnsAggregate(
     const url = try common.buildUrl(arena_alloc, ctx.dd_domain, path, query_params);
     const headers = try common.buildHeaders(arena_alloc, ctx, &[_]CustomHeader{});
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, .GET, url, headers, null);
+    const response = try common.executeRequest(ctx.io, arena_alloc, .GET, url, headers, null);
 
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test {
-    std.testing.refAllDecls(@This());
-}
 
 test "parseCompute - count aggregation" {
     const result = try parseCompute("count:*");

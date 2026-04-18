@@ -10,16 +10,14 @@ const aggregate = @import("aggregate.zig");
 const get = @import("get.zig");
 const validate = @import("validate.zig");
 const raw = @import("raw.zig");
-const auth_mod = @import("auth.zig");
 
 // ============================================================================
 // Main Entry Point
 // ============================================================================
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
     // Set up argument parser with subcommands
     var app = App.init(allocator, "dd-cli", "Query Datadog API with subcommands for common operations");
@@ -404,42 +402,26 @@ pub fn main() !void {
     try raw_cmd.addArg(Arg.singleValueOption("data", null, "Request body"));
     try root.addSubcommand(raw_cmd);
 
-    // auth command - OAuth2 login/logout
-    var auth_cmd = app.createCommand("auth", "Manage OAuth2 authentication");
-    var auth_login_cmd = app.createCommand("login", "Log in with OAuth2 (PKCE flow)");
-    try auth_login_cmd.addArg(Arg.singleValueOption("client-id", null, "OAuth2 client ID override (auto-registered via DCR if omitted)"));
-    try auth_cmd.addSubcommand(auth_login_cmd);
-    const auth_logout_cmd = app.createCommand("logout", "Remove stored OAuth2 token");
-    try auth_cmd.addSubcommand(auth_logout_cmd);
-    try root.addSubcommand(auth_cmd);
-
     // Parse arguments
-    const matches = try app.parseProcess();
+    const matches = try app.parseProcess(io, init.minimal.args);
 
-    // Handle auth commands before building context (no API credentials needed)
-    if (matches.subcommandMatches("auth")) |*auth_matches| {
-        const domain_from_env = std.process.getEnvVarOwned(allocator, "DD_SITE") catch null;
-        defer if (domain_from_env) |d| allocator.free(d);
-        const domain = matches.getSingleValue("domain") orelse domain_from_env orelse "datadoghq.com";
-        if (auth_matches.subcommandMatches("login")) |*login_matches| {
-            try auth_mod.handleLoginCommand(allocator, domain, login_matches.getSingleValue("client-id"));
-            return;
-        } else if (auth_matches.subcommandMatches("logout")) |_| {
-            try auth_mod.handleLogoutCommand(allocator);
-            return;
-        } else {
-            std.debug.print("Error: Use 'auth login' or 'auth logout'\n", .{});
-            return error.UnknownSubcommand;
-        }
-    }
+    // Read env vars from the process init object (non-global, testable)
+    const env = common.EnvVars{
+        .dd_site = init.environ_map.get("DD_SITE"),
+        .access_token = init.environ_map.get("DD_ACCESS_TOKEN"),
+        .api_key = init.environ_map.get("DD_API_KEY"),
+        .app_key = init.environ_map.get("DD_APPLICATION_KEY"),
+    };
 
     // Build shared context from global flags (created once, passed to all handlers)
     var ctx = try common.initConfig(
+        io,
         allocator,
         matches.getSingleValue("domain"),
         matches.getSingleValue("from"),
         matches.getSingleValue("to"),
         matches.containsArg("verbose"),
+        env,
     );
     defer ctx.deinit();
 
@@ -601,7 +583,6 @@ pub fn main() !void {
         std.debug.print("  get       - Get specific resource by ID (log, host, metrics, api, event, monitor, downtime, incident, notebook, error, device, case, dashboard, synthetic, signal, finding, pipeline-event, test-event)\n", .{});
         std.debug.print("  validate  - Validate API credentials\n", .{});
         std.debug.print("  raw       - Low-level API access\n", .{});
-        std.debug.print("  auth      - Manage OAuth2 authentication (login/logout)\n", .{});
         std.debug.print("\nExamples:\n", .{});
         std.debug.print("  dd-cli list logs \"error\" --from 1h\n", .{});
         std.debug.print("  dd-cli list metrics\n", .{});

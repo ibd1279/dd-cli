@@ -18,7 +18,7 @@ src/
 ├── main.zig       # CLI argument definitions (yazap) + subcommand dispatch
 ├── common.zig     # Context struct, initConfig, buildHeaders, buildUrl,
 │                  # executeRequest, time parsing, JSON utilities, streaming
-├── auth.zig       # OAuth2 PKCE login/logout, token file I/O
+├── auth.zig       # Token file I/O (loadStoredToken, isTokenExpired)
 ├── list.zig       # list verb handlers
 ├── aggregate.zig  # aggregate verb handlers
 ├── get.zig        # get verb handlers
@@ -33,11 +33,15 @@ src/
 
 ### Context
 
-`common.Context` is created once in `main()` by `initConfig()` and passed as `*const Context` to every handler. It holds credentials, domain, and time range.
+`common.Context` is created once in `main()` by `initConfig()` and passed as `*const Context` to every handler. It holds credentials, domain, time range, and `io: std.Io` for all I/O operations. Use `ctx.io` anywhere file, time, or network I/O is needed.
+
+`initConfig(io, allocator, domain_arg, from_arg, to_arg, verbose, env)` takes a `common.EnvVars` struct (populated from `std.process.Init.environ_map` in `main()`) rather than reading env vars directly — this makes the function testable without real env state.
+
+`main()` takes `std.process.Init` (Zig 0.16.0 entry point) which provides `init.io`, `init.gpa`, `init.minimal.args`, and `init.environ_map`.
 
 **Auth priority** (in `initConfig`):
 1. `DD_ACCESS_TOKEN` env var → `auth_type = .bearer`
-2. Stored token file (`~/.config/dd-cli/token.json`) → `auth_type = .bearer` (auto-refreshes via `DD_CLIENT_ID` env var)
+2. Stored token file (`~/.config/dd-cli/token.json`) → `auth_type = .bearer` (no auto-refresh; expired tokens fall through)
 3. `DD_API_KEY` + `DD_APPLICATION_KEY` env vars → `auth_type = .api_key`
 
 ### Headers
@@ -50,7 +54,7 @@ All handler call sites use this pattern — never construct auth headers manuall
 
 ### Auth commands
 
-`auth login` and `auth logout` are handled **before** `initConfig` in `main()` since they don't require existing credentials. The `auth.zig` module owns all token file logic.
+There is no interactive login command. `auth.zig` owns token file logic (`~/.config/dd-cli/token.json`) and exposes `loadStoredToken(io, allocator)` and `isTokenExpired(expires_at, now)`. Token refresh is not performed — expired tokens fall through to API key auth.
 
 ### URL building
 
@@ -61,7 +65,9 @@ Datadog OAuth2 endpoints use `app.{domain}` (not `api.{domain}`), handled in `au
 
 ### Streaming / pagination
 
-`streamLogsSearch` and `streamEventsSearch` in `common.zig` take pre-built `headers` and a URL base. They own their arena internally. Callers in `list.zig` build headers once and pass them in.
+`streamLogsSearch`, `streamSpansSearch`, and `streamEventsSearch` in `list.zig` / `common.zig` all delegate to `common.runPaginatedStream(io, allocator, url_base, headers, limit, auto_paginate, label, ctx)`. The `ctx` argument is an anonymous struct that implements `buildBody(arena_alloc, cursor)` — this is the only caller-specific piece; the page loop, error handling, and cursor management are shared.
+
+For simple one-shot GET requests, use `common.getJson(ctx, arena_alloc, path, query_params)` which builds headers, builds the URL, logs if verbose, and calls `executeRequest`.
 
 ### Memory
 
@@ -71,7 +77,7 @@ Datadog OAuth2 endpoints use `app.{domain}` (not `api.{domain}`), handled in `au
 
 ## Key Conventions
 
-- Zig 0.15.2 — use `std.ArrayList(u8).writer(allocator)` pattern for string building
+- Zig 0.16.0 — `std.ArrayList(u8).writer(allocator)` for string building; `io: std.Io` threads through Context and all I/O operations
 - `std.Io.Writer.Allocating` for HTTP response bodies
 - `std.json.parseFromSlice` / `std.json.fmt` for JSON; `std.json.Value` for dynamic parsing
 - Time arguments: ISO 8601 strings internally; some APIs need Unix seconds/ms (use `parseIso8601ToUnix`)
@@ -79,10 +85,9 @@ Datadog OAuth2 endpoints use `app.{domain}` (not `api.{domain}`), handled in `au
 
 ## Dependencies
 
-- `yazap` — argument parser
-- `oauth2` (ibd1279/oauth2) — PKCE utilities, CallbackServer, token exchange; depends on `otel-zig`
+- `yazap` (0.7.0) — argument parser
 
-Both are declared in `build.zig.zon` and wired to the exe module in `build.zig`.
+Declared in `build.zig.zon` and wired to the exe module in `build.zig`.
 
 ## Adding a New Command
 

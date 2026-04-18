@@ -27,45 +27,19 @@ export DD_APPLICATION_KEY="your_application_key"
 export DD_SITE="datadoghq.com"  # Optional: datadoghq.eu, us3.datadoghq.com, etc.
 ```
 
-### OAuth2 Authentication
+### Bearer Token Authentication
 
-dd-cli supports OAuth2 PKCE as an alternative to API keys. This is useful when distributing the tool to users who shouldn't need to manage API keys directly.
+Set `DD_ACCESS_TOKEN` to use a bearer token directly:
 
 ```bash
-# Log in (opens browser for authorization)
-DD_CLIENT_ID=your_client_id dd-cli auth login
-
-# Or pass the client ID as a flag
-dd-cli auth login --client-id your_client_id
-
-# Log out (removes stored token)
-dd-cli auth logout
+export DD_ACCESS_TOKEN="your_access_token"
 ```
 
-The token is stored at `~/.config/dd-cli/token.json` (mode 0600) and refreshed automatically when expired.
+Alternatively, place a token JSON file at `~/.config/dd-cli/token.json` with the fields `access_token` and `expires_at` (Unix seconds). dd-cli reads this file automatically when no env vars are set.
 
-**Authentication priority:** `DD_ACCESS_TOKEN` env var → stored token file → `DD_API_KEY` + `DD_APPLICATION_KEY`
-
-> **Note:** Datadog's OAuth2 is primarily designed for marketplace integrations. For personal use, API keys are simpler. See [Datadog OAuth Apps](https://docs.datadoghq.com/account_management/org_settings/oauth_apps/) for how to register an OAuth2 application and obtain a client ID.
+**Authentication priority:** `DD_ACCESS_TOKEN` env var → `~/.config/dd-cli/token.json` → `DD_API_KEY` + `DD_APPLICATION_KEY`
 
 ## Commands
-
-### auth login / auth logout
-
-Authenticate with OAuth2 (PKCE flow):
-
-```bash
-# Log in — opens browser for authorization
-dd-cli auth login --client-id <your_client_id>
-# Or via environment variable:
-DD_CLIENT_ID=<your_client_id> dd-cli auth login
-
-# Log out — removes stored token
-dd-cli auth logout
-```
-
-**Options:**
-- `--client-id`: OAuth2 client ID (or set `DD_CLIENT_ID` env var)
 
 ### validate
 
@@ -1405,7 +1379,7 @@ src/
 
 ## Requirements
 
-- Zig 0.15.2 or later
+- Zig 0.16.0 or later
 
 ## API Reference
 

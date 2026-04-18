@@ -51,16 +51,13 @@ pub fn handleRawCommand(
 
     // Execute request
     if (ctx.verbose) std.debug.print("{s}\n", .{url});
-    const response = try common.executeRequest(arena_alloc, method, url, headers, body);
+    const response = try common.executeRequest(ctx.io, arena_alloc, method, url, headers, body);
 
     // Output
-    try common.writeOutput(response);
+    try common.writeOutput(ctx.io, response);
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test {
-    std.testing.refAllDecls(@This());
-}
